@@ -1594,6 +1594,112 @@ st.markdown(
     unsafe_allow_html=True,
 )
 
+with st.expander("📋 How each column is filled — Extraction & Automation Rules"):
+    st.markdown(
+        """
+<div class="glass-card" style="margin:0;padding:1.5rem 2rem;">
+
+**Every row in the funnel sheet is built from these rules.** Gemini AI extracts the raw data from the email; then the bot cleans and validates each field before writing it to the sheet.
+
+---
+
+#### 🆔 Quote ID
+Only Exponentia internal IDs like **I835-26** or **F780-23** are accepted.
+The bot reads the email **body only** (never the subject line) and looks for the sales tag near *"Add and archive"* or a *"Quote ID: …"* label.
+Partner references (QTE-…, Vodafone numbers, PID/BID/SP) are always rejected.
+
+#### 📅 Opportunity Date
+The date work **actually started** — not the first email in the thread.
+- Older messages about a different scope or country are ignored.
+- If our team was waiting on missing info (LPOC, capacity, customer name), the clock starts when that info arrived.
+- Idle wait-on-customer days are excluded.
+
+#### 📅 Proposal Date
+The date our team sent the **final pricing response**.
+If no pricing was sent yet, it defaults to the Opportunity Date.
+
+#### 🏢 Partner Name
+The external company that emailed Exponentia to request a quote (e.g. *CMC Networks*, *Noor Data Network*).
+It is **never** set to "Exponentia Global." If not found, the bot uses the sender's email domain.
+
+#### 🏭 End Customer
+The final client organization (e.g. *Baker Hughes*).
+Defaults to **Unknown** if no end customer is mentioned.
+
+#### 📍 Site A / Site A City
+Address and city extracted from the email. Defaults to **-**.
+
+#### 📍 Site B / Site B City
+Same as Site A — but **forced to "-"** for Internet / DIA / BIA services (no B-end).
+
+#### 🔧 Technology
+Strict mapping from the service type:
+
+| Service | → Technology |
+|---------|-------------|
+| DIA / BIA | Internet |
+| L2VPN / MPLS / EVPL Linear | Ethernet |
+| IPLC / IEPL / EoSDH / DPLC / DEPL | TDM |
+| Colocation + PWR | Datacenter |
+| Cross Connects / Equipment / Field Support | Managed Services / Hardware |
+
+#### 📦 Service / Products
+The raw service name from the email (e.g. *DIA*, *IPLC*, *L2VPN*).
+
+#### 📶 Capacity / Quantity
+Always includes the unit — e.g. **50 Mbps**, **20 Gbps**.
+
+#### 💰 NRC & MRC
+Formatted with **$** and commas (e.g. *$1,500.00*). If not available → **-**.
+
+#### 📧 Mode of Communication
+Always set to **Email**.
+
+#### 📝 Contract Term
+Always in months — e.g. **12 Months**, **24 Months**, **36 Months**.
+If one row has multiple terms (12 / 24 / 36), a **separate row** is created for each.
+
+#### 👤 Sales Effort By / POC / Contact Email
+Extracted from the email. Default **-** if not mentioned.
+
+#### 💬 Comments
+Notes or context from the email thread. Default **-**.
+
+#### 📊 Status / Sub-status
+New rows are always **OPEN** / **MEDIUM**.
+
+#### ⏱️ TAT (Turnaround Time)
+Business days between Opportunity and Proposal dates — **excluding weekends and Pakistan public holidays** (loaded from `holidays.json`).
+
+#### 🌐 On-Net / Off-Net
+Defaults to **On-Net** unless the email explicitly says *off-net*.
+
+#### 🔌 LM Infra Details
+Exactly **Fiber** or **Wireless** — the physical last-mile media type.
+Terms & conditions or SLA text is never placed here. Default: Fiber.
+
+#### 🛡️ Last Mile Protection
+Exactly **Protected**, **Unprotected**, or **N/A**. Default: Unprotected.
+
+#### 🛡️ Wet Segment Protection
+Exactly **Protected**, **Unprotected**, or **N/A**. Default: N/A.
+This is protection status only — not fiber/wireless media type.
+
+#### 🔗 XC Included / Excluded
+**Included**, **Excluded**, or **N/A**.
+For Internet / DIA / BIA → always **-** (not applicable).
+
+#### 🗓️ Holidays
+Number of Pakistan public holidays (weekdays only) that fell within the Opportunity → Proposal date range.
+
+#### 🎯 Offered Us
+What we offered — e.g. **New Service**, **Renewal**, **Upgrade**. Default: New Service.
+
+</div>
+        """,
+        unsafe_allow_html=True,
+    )
+
 st.markdown(
     f"""
     <div class="glass-card deploy-card">
