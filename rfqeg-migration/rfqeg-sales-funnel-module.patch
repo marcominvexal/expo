@@ -1,7 +1,7 @@
 From 95872fe3e769fdf10523e8b40d98ffe135a36c4f Mon Sep 17 00:00:00 2001
 From: Cursor Agent <cursoragent@cursor.com>
 Date: Wed, 29 Jul 2026 12:26:20 +0000
-Subject: [PATCH] Add Sales Funnel Bot as contained Expo module in RFQEG
+Subject: [PATCH 1/2] Add Sales Funnel Bot as contained Expo module in RFQEG
 MIME-Version: 1.0
 Content-Type: text/plain; charset=UTF-8
 Content-Transfer-Encoding: 8bit
@@ -2281,6 +2281,84 @@ index 0000000..0da7fc6
 +    holidayCount: countHolidaysInRange(startDate, endDate, holidaySet),
 +  };
 +}
+-- 
+2.43.0
+
+
+From 2eab4395743ace5872e418381236cddcabb78c29 Mon Sep 17 00:00:00 2001
+From: Cursor Agent <cursoragent@cursor.com>
+Date: Thu, 30 Jul 2026 07:12:05 +0000
+Subject: [PATCH 2/2] Default Gemini model to gemini-2.5-flash for Funnel Bot
+
+New Google AI Studio keys reject gemini-2.0-flash (404). Align
+funnel + portal defaults and document the override in AGENTS.md.
+---
+ .env.example             | 4 ++--
+ AGENTS.md                | 1 +
+ src/lib/funnel/gemini.ts | 2 +-
+ src/lib/gemini.ts        | 2 +-
+ 4 files changed, 5 insertions(+), 4 deletions(-)
+
+diff --git a/.env.example b/.env.example
+index 28e2de4..0d5bbd0 100644
+--- a/.env.example
++++ b/.env.example
+@@ -21,7 +21,7 @@ ENCRYPTION_KEY="0000000000000000000000000000000000000000000000000000000000000000
+ 
+ # --- Google Gemini API ---
+ GEMINI_API_KEY=""
+-GEMINI_MODEL="gemini-2.0-flash"
++GEMINI_MODEL="gemini-2.5-flash"
+ 
+ # --- Email import provider: "imap" (Gmail app password) or "oauth" (Gmail API) ---
+ # Leave unset to auto-detect based on which credentials are present.
+@@ -59,7 +59,7 @@ GMAIL_USER="me"
+ FUNNEL_SPREADSHEET_ID="1E9gYdeZUwMEmnwe164io7E47QuXnBfYcELdulUroN_4"
+ FUNNEL_WORKSHEET_GID="0"
+ # Optional model override (defaults to GEMINI_MODEL)
+-# FUNNEL_GEMINI_MODEL="gemini-2.0-flash"
++# FUNNEL_GEMINI_MODEL="gemini-2.5-flash"
+ # Google service account with Sheets+Drive access (share the sheet with client_email)
+ # Option A: inline JSON
+ # GOOGLE_SERVICE_ACCOUNT_JSON='{"type":"service_account","client_email":"...","private_key":"-----BEGIN..."}'
+diff --git a/AGENTS.md b/AGENTS.md
+index 85d1426..67a4030 100644
+--- a/AGENTS.md
++++ b/AGENTS.md
+@@ -13,6 +13,7 @@ Enterprise telecom RFQ management portal (Next.js). See README for standard setu
+ - **Sync behavior:** processes **all UNSEEN** inbox mail (Expo-style), not only “Solution Request”. Quote IDs are body-only `I###-##` / `F###-##`.
+ - **TAT:** Pakistan holiday-aware working days between Opportunity and Proposal (`src/lib/funnel/holidays.json` + `tat.ts`).
+ - Sync/reapply can take up to ~60s on Gemini 503/429 retries (`maxDuration` 120 on those routes).
++- Default Gemini model is `gemini-2.5-flash` (`GEMINI_MODEL` / `FUNNEL_GEMINI_MODEL`). Older `gemini-2.0-flash` may 404 for new API keys.
+ 
+ ### Standard commands
+ 
+diff --git a/src/lib/funnel/gemini.ts b/src/lib/funnel/gemini.ts
+index d4d91dd..7d12b20 100644
+--- a/src/lib/funnel/gemini.ts
++++ b/src/lib/funnel/gemini.ts
+@@ -2,7 +2,7 @@
+ 
+ import { GoogleGenerativeAI, SchemaType, type ResponseSchema } from "@google/generative-ai";
+ 
+-const MODEL = process.env.FUNNEL_GEMINI_MODEL || process.env.GEMINI_MODEL || "gemini-2.0-flash";
++const MODEL = process.env.FUNNEL_GEMINI_MODEL || process.env.GEMINI_MODEL || "gemini-2.5-flash";
+ const RETRY_LIMIT_MS = 60_000;
+ 
+ export interface FunnelCircuit {
+diff --git a/src/lib/gemini.ts b/src/lib/gemini.ts
+index 9988e0f..f126946 100644
+--- a/src/lib/gemini.ts
++++ b/src/lib/gemini.ts
+@@ -5,7 +5,7 @@ import type { ExtractedRfq, DelayResult, BudgetaryOffer } from "@/types";
+ 
+ export { naiveBusinessDays };
+ 
+-const MODEL = process.env.GEMINI_MODEL || "gemini-2.0-flash";
++const MODEL = process.env.GEMINI_MODEL || "gemini-2.5-flash";
+ 
+ function client() {
+   const key = process.env.GEMINI_API_KEY;
 -- 
 2.43.0
 

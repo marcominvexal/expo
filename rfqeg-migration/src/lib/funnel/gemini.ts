@@ -2,7 +2,7 @@
 
 import { GoogleGenerativeAI, SchemaType, type ResponseSchema } from "@google/generative-ai";
 
-const MODEL = process.env.FUNNEL_GEMINI_MODEL || process.env.GEMINI_MODEL || "gemini-2.0-flash";
+const MODEL = process.env.FUNNEL_GEMINI_MODEL || process.env.GEMINI_MODEL || "gemini-2.5-flash";
 const RETRY_LIMIT_MS = 60_000;
 
 export interface FunnelCircuit {

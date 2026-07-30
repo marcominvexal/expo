@@ -20,3 +20,6 @@ Thumbs.db
 .idea/
 .vscode/
 *.swp
+rfqeg-migration/credentials.env
+rfqeg-migration/local-only/
+rfqeg-migration/credentials.env
