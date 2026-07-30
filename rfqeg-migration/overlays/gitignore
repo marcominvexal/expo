@@ -1,0 +1,46 @@
+# dependencies
+/node_modules
+/.pnp
+.pnp.js
+
+# next
+/.next/
+/out/
+next-env.d.ts
+
+# production
+/build
+
+# env & secrets — NEVER commit
+.env
+.env.local
+.env*.local
+*.pem
+
+# logs
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+
+# misc
+.DS_Store
+*.tsbuildinfo
+
+# JSON database + backups (local data — do not commit)
+/database.json
+/database.json.tmp-*
+/backups/
+
+# local storage for attachments
+/storage/*
+!/storage/.gitkeep
+
+# token/cache files
+/.cache
+gmail-token.json
+.vercel
+.env*
+
+# Google service account JSON (Funnel Sheets) — never commit
+service_account.json
+**/service_account.json

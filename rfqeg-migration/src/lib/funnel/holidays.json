@@ -1,0 +1,37 @@
+{
+  "year": 2026,
+  "country": "Pakistan",
+  "_comment": "Official Pakistan public holidays for TAT. Weekends (Sat/Sun) are excluded separately. Lunar holidays use these projected calendar dates.",
+  "dates": [
+    "2026-02-05",
+    "2026-03-21",
+    "2026-03-22",
+    "2026-03-23",
+    "2026-05-01",
+    "2026-05-27",
+    "2026-05-28",
+    "2026-05-29",
+    "2026-06-24",
+    "2026-06-25",
+    "2026-08-14",
+    "2026-08-25",
+    "2026-11-09",
+    "2026-12-25"
+  ],
+  "holidays": [
+    { "date": "2026-02-05", "name": "Kashmir Solidarity Day" },
+    { "date": "2026-03-21", "name": "Eid-ul-Fitr" },
+    { "date": "2026-03-22", "name": "Eid-ul-Fitr" },
+    { "date": "2026-03-23", "name": "Eid-ul-Fitr / Pakistan Day" },
+    { "date": "2026-05-01", "name": "Labour Day" },
+    { "date": "2026-05-27", "name": "Eid-ul-Azha" },
+    { "date": "2026-05-28", "name": "Eid-ul-Azha / Youm-e-Takbeer" },
+    { "date": "2026-05-29", "name": "Eid-ul-Azha" },
+    { "date": "2026-06-24", "name": "Ashura (9th Muharram)" },
+    { "date": "2026-06-25", "name": "Ashura (10th Muharram)" },
+    { "date": "2026-08-14", "name": "Independence Day" },
+    { "date": "2026-08-25", "name": "Eid Milad-un-Nabi" },
+    { "date": "2026-11-09", "name": "Allama Iqbal Day" },
+    { "date": "2026-12-25", "name": "Quaid-e-Azam Day / Christmas" }
+  ]
+}

@@ -1,0 +1,2364 @@
+From 95872fe3e769fdf10523e8b40d98ffe135a36c4f Mon Sep 17 00:00:00 2001
+From: Cursor Agent <cursoragent@cursor.com>
+Date: Wed, 29 Jul 2026 12:26:20 +0000
+Subject: [PATCH 1/2] Add Sales Funnel Bot as contained Expo module in RFQEG
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+Port the Exponentia Gmail→Gemini→Sheets funnel into src/lib/funnel
+with Sales-only /funnel UI and /api/funnel/* routes, separate from
+RFQ Update From Email.
+---
+ .env.example                              |  12 +
+ .gitignore                                |   4 +
+ AGENTS.md                                 |  19 ++
+ src/app/(app)/funnel/page.tsx             |  18 ++
+ src/app/api/funnel/reapply/route.ts       |  18 ++
+ src/app/api/funnel/setup-columns/route.ts |  16 +
+ src/app/api/funnel/status/route.ts        |  11 +
+ src/app/api/funnel/sync/route.ts          |  18 ++
+ src/components/app-shell.tsx              |   5 +-
+ src/features/funnel/funnel-dashboard.tsx  | 154 ++++++++++
+ src/features/funnel/rules-panel.tsx       |  84 ++++++
+ src/lib/funnel/__tests__/funnel.test.ts   |  42 +++
+ src/lib/funnel/constants.ts               |  71 +++++
+ src/lib/funnel/dates.ts                   | 138 +++++++++
+ src/lib/funnel/gemini.ts                  | 197 +++++++++++++
+ src/lib/funnel/gmail.ts                   | 174 +++++++++++
+ src/lib/funnel/holidays.json              |  37 +++
+ src/lib/funnel/index.ts                   |  11 +
+ src/lib/funnel/normalizers.ts             | 165 +++++++++++
+ src/lib/funnel/quote-id.ts                | 108 +++++++
+ src/lib/funnel/sheets.ts                  | 313 ++++++++++++++++++++
+ src/lib/funnel/sync.ts                    | 339 ++++++++++++++++++++++
+ src/lib/funnel/tat.ts                     | 108 +++++++
+ 23 files changed, 2060 insertions(+), 2 deletions(-)
+ create mode 100644 AGENTS.md
+ create mode 100644 src/app/(app)/funnel/page.tsx
+ create mode 100644 src/app/api/funnel/reapply/route.ts
+ create mode 100644 src/app/api/funnel/setup-columns/route.ts
+ create mode 100644 src/app/api/funnel/status/route.ts
+ create mode 100644 src/app/api/funnel/sync/route.ts
+ create mode 100644 src/features/funnel/funnel-dashboard.tsx
+ create mode 100644 src/features/funnel/rules-panel.tsx
+ create mode 100644 src/lib/funnel/__tests__/funnel.test.ts
+ create mode 100644 src/lib/funnel/constants.ts
+ create mode 100644 src/lib/funnel/dates.ts
+ create mode 100644 src/lib/funnel/gemini.ts
+ create mode 100644 src/lib/funnel/gmail.ts
+ create mode 100644 src/lib/funnel/holidays.json
+ create mode 100644 src/lib/funnel/index.ts
+ create mode 100644 src/lib/funnel/normalizers.ts
+ create mode 100644 src/lib/funnel/quote-id.ts
+ create mode 100644 src/lib/funnel/sheets.ts
+ create mode 100644 src/lib/funnel/sync.ts
+ create mode 100644 src/lib/funnel/tat.ts
+
+diff --git a/.env.example b/.env.example
+index 2087a21..28e2de4 100644
+--- a/.env.example
++++ b/.env.example
+@@ -54,6 +54,18 @@ GMAIL_REFRESH_TOKEN=""
+ # Mailbox to search (usually the authenticated account)
+ GMAIL_USER="me"
+ 
++# --- Sales Funnel Bot (Expo module — Gmail → Gemini → Google Sheets) ---
++# Separate from RFQ "Update From Email". Sales-only UI at /funnel.
++FUNNEL_SPREADSHEET_ID="1E9gYdeZUwMEmnwe164io7E47QuXnBfYcELdulUroN_4"
++FUNNEL_WORKSHEET_GID="0"
++# Optional model override (defaults to GEMINI_MODEL)
++# FUNNEL_GEMINI_MODEL="gemini-2.0-flash"
++# Google service account with Sheets+Drive access (share the sheet with client_email)
++# Option A: inline JSON
++# GOOGLE_SERVICE_ACCOUNT_JSON='{"type":"service_account","client_email":"...","private_key":"-----BEGIN..."}'
++# Option B: path to JSON file (recommended locally; never commit the file)
++GOOGLE_SERVICE_ACCOUNT_PATH="service_account.json"
++
+ # --- Delay / SLA engine ---
+ DELAY_COUNTRY="Pakistan"
+ # Hours before deadline that the AI Budgetary Offer button auto-activates
+diff --git a/.gitignore b/.gitignore
+index b3a9416..2cdf799 100644
+--- a/.gitignore
++++ b/.gitignore
+@@ -40,3 +40,7 @@ yarn-error.log*
+ gmail-token.json
+ .vercel
+ .env*
++
++# Google service account JSON (Funnel Sheets) — never commit
++service_account.json
++**/service_account.json
+diff --git a/AGENTS.md b/AGENTS.md
+new file mode 100644
+index 0000000..85d1426
+--- /dev/null
++++ b/AGENTS.md
+@@ -0,0 +1,19 @@
++# RFQ Portal (RFQEG)
++
++Enterprise telecom RFQ management portal (Next.js). See README for standard setup.
++
++## Cursor Cloud specific instructions
++
++### Sales Funnel Bot (contained Expo module)
++
++- **Route:** `/funnel` (Sales-only nav item). **Not** the same as RFQs → “Update From Email” (that imports Solution Request RFQs into the portal DB).
++- **APIs (Sales JWT required):** `GET /api/funnel/status`, `POST /api/funnel/sync`, `POST /api/funnel/setup-columns`, `POST /api/funnel/reapply`.
++- **Logic lives in** `src/lib/funnel/*` — keep it self-contained; do not mix with `src/lib/gemini.ts` RFQ extractors or `update-from-email`.
++- **Credentials:** reuses `GEMINI_API_KEY`, `IMAP_*` (or Gmail OAuth). Sheets needs a **service account** via `GOOGLE_SERVICE_ACCOUNT_JSON` or `GOOGLE_SERVICE_ACCOUNT_PATH` (see `.env.example`). Share the spreadsheet with the SA `client_email`.
++- **Sync behavior:** processes **all UNSEEN** inbox mail (Expo-style), not only “Solution Request”. Quote IDs are body-only `I###-##` / `F###-##`.
++- **TAT:** Pakistan holiday-aware working days between Opportunity and Proposal (`src/lib/funnel/holidays.json` + `tat.ts`).
++- Sync/reapply can take up to ~60s on Gemini 503/429 retries (`maxDuration` 120 on those routes).
++
++### Standard commands
++
++Use `npm run dev`, `npm run lint`, `npm run typecheck`, `npm test` as documented in `package.json` / README.
+diff --git a/src/app/(app)/funnel/page.tsx b/src/app/(app)/funnel/page.tsx
+new file mode 100644
+index 0000000..f6f6114
+--- /dev/null
++++ b/src/app/(app)/funnel/page.tsx
+@@ -0,0 +1,18 @@
++"use client";
++
++import { useMe } from "@/hooks/useAuth";
++import { FunnelDashboard } from "@/features/funnel/funnel-dashboard";
++
++export default function FunnelPage() {
++  const { data: user } = useMe();
++
++  if (user && user.role !== "SALES") {
++    return (
++      <p className="text-sm text-muted-foreground">
++        Sales Funnel Bot is available to Sales (Admin) only.
++      </p>
++    );
++  }
++
++  return <FunnelDashboard />;
++}
+diff --git a/src/app/api/funnel/reapply/route.ts b/src/app/api/funnel/reapply/route.ts
+new file mode 100644
+index 0000000..b9ee223
+--- /dev/null
++++ b/src/app/api/funnel/reapply/route.ts
+@@ -0,0 +1,18 @@
++import { NextRequest } from "next/server";
++import { requireUser } from "@/lib/auth";
++import { handle, ok, fail } from "@/lib/api";
++import { reapplyFunnelRules } from "@/lib/funnel/sync";
++
++export const maxDuration = 120;
++
++export async function POST(req: NextRequest) {
++  return handle(async () => {
++    await requireUser(req, "SALES");
++    try {
++      const result = await reapplyFunnelRules();
++      return ok(result);
++    } catch (e: any) {
++      return fail(e?.message || "Reapply rules failed", 503);
++    }
++  });
++}
+diff --git a/src/app/api/funnel/setup-columns/route.ts b/src/app/api/funnel/setup-columns/route.ts
+new file mode 100644
+index 0000000..5f78544
+--- /dev/null
++++ b/src/app/api/funnel/setup-columns/route.ts
+@@ -0,0 +1,16 @@
++import { NextRequest } from "next/server";
++import { requireUser } from "@/lib/auth";
++import { handle, ok, fail } from "@/lib/api";
++import { setupFunnelColumns } from "@/lib/funnel/sync";
++
++export async function POST(req: NextRequest) {
++  return handle(async () => {
++    await requireUser(req, "SALES");
++    try {
++      const result = await setupFunnelColumns();
++      return ok(result);
++    } catch (e: any) {
++      return fail(e?.message || "Setup columns failed", 503);
++    }
++  });
++}
+diff --git a/src/app/api/funnel/status/route.ts b/src/app/api/funnel/status/route.ts
+new file mode 100644
+index 0000000..c761083
+--- /dev/null
++++ b/src/app/api/funnel/status/route.ts
+@@ -0,0 +1,11 @@
++import { NextRequest } from "next/server";
++import { requireUser } from "@/lib/auth";
++import { handle, ok, fail } from "@/lib/api";
++import { getFunnelStatus } from "@/lib/funnel/sync";
++
++export async function GET(req: NextRequest) {
++  return handle(async () => {
++    await requireUser(req, "SALES");
++    return ok(getFunnelStatus());
++  });
++}
+diff --git a/src/app/api/funnel/sync/route.ts b/src/app/api/funnel/sync/route.ts
+new file mode 100644
+index 0000000..85d9737
+--- /dev/null
++++ b/src/app/api/funnel/sync/route.ts
+@@ -0,0 +1,18 @@
++import { NextRequest } from "next/server";
++import { requireUser } from "@/lib/auth";
++import { handle, ok, fail } from "@/lib/api";
++import { runFunnelSync } from "@/lib/funnel/sync";
++
++export const maxDuration = 120;
++
++export async function POST(req: NextRequest) {
++  return handle(async () => {
++    await requireUser(req, "SALES");
++    try {
++      const result = await runFunnelSync();
++      return ok(result);
++    } catch (e: any) {
++      return fail(e?.message || "Funnel sync failed", 503);
++    }
++  });
++}
+diff --git a/src/components/app-shell.tsx b/src/components/app-shell.tsx
+index 9266d01..f7a6ceb 100644
+--- a/src/components/app-shell.tsx
++++ b/src/components/app-shell.tsx
+@@ -1,7 +1,7 @@
+ "use client";
+ import Link from "next/link";
+ import { usePathname, useRouter } from "next/navigation";
+-import { LayoutDashboard, FileStack, Settings, Network, LogOut, Building2, Truck } from "lucide-react";
++import { LayoutDashboard, FileStack, Settings, Network, LogOut, Building2, Truck, Sheet } from "lucide-react";
+ import { motion } from "framer-motion";
+ import { cn } from "@/lib/utils";
+ import { Button } from "@/components/ui/button";
+@@ -13,6 +13,7 @@ import { api } from "@/lib/api-client";
+ const NAV = [
+   { href: "/dashboard", label: "Dashboard", icon: LayoutDashboard },
+   { href: "/rfqs", label: "RFQs", icon: FileStack },
++  { href: "/funnel", label: "Funnel", icon: Sheet, salesOnly: true },
+   { href: "/partners", label: "Partners", icon: Building2, salesOnly: true },
+   { href: "/suppliers", label: "Suppliers", icon: Truck, salesOnly: true },
+   { href: "/settings", label: "Settings", icon: Settings, salesOnly: true },
+@@ -93,7 +94,7 @@ export function AppShell({ children }: { children: React.ReactNode }) {
+ 
+         {/* Mobile bottom nav */}
+         <nav className="fixed bottom-0 left-0 right-0 z-40 flex border-t bg-background/95 backdrop-blur-xl md:hidden">
+-          {NAV.filter((n) => !n.salesOnly || user?.role === "SALES").slice(0, 4).map((n) => {
++          {NAV.filter((n) => !n.salesOnly || user?.role === "SALES").slice(0, 5).map((n) => {
+             const active = pathname.startsWith(n.href);
+             return (
+               <Link
+diff --git a/src/features/funnel/funnel-dashboard.tsx b/src/features/funnel/funnel-dashboard.tsx
+new file mode 100644
+index 0000000..fbe6cf9
+--- /dev/null
++++ b/src/features/funnel/funnel-dashboard.tsx
+@@ -0,0 +1,154 @@
++"use client";
++
++import { useState } from "react";
++import { useQuery, useQueryClient } from "@tanstack/react-query";
++import {
++  Loader2,
++  RefreshCw,
++  Mail,
++  Columns3,
++  ExternalLink,
++  CheckCircle2,
++  XCircle,
++} from "lucide-react";
++import { Button } from "@/components/ui/button";
++import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
++import { Badge } from "@/components/ui/badge";
++import { api } from "@/lib/api-client";
++import { FunnelRulesPanel } from "./rules-panel";
++
++type FunnelStatus = {
++  sheetsConfigured: boolean;
++  emailConfigured: boolean;
++  geminiConfigured: boolean;
++  sheetUrl: string;
++  serviceAccountEmail: string | null;
++  emailUser: string;
++};
++
++function StatusDot({ ok }: { ok: boolean }) {
++  return ok ? (
++    <CheckCircle2 className="h-4 w-4 text-emerald-500" />
++  ) : (
++    <XCircle className="h-4 w-4 text-destructive" />
++  );
++}
++
++export function FunnelDashboard() {
++  const qc = useQueryClient();
++  const { data: status, isLoading } = useQuery({
++    queryKey: ["funnel-status"],
++    queryFn: () => api.get<FunnelStatus>("/api/funnel/status"),
++  });
++
++  const [busy, setBusy] = useState<string | null>(null);
++  const [msg, setMsg] = useState<string | null>(null);
++
++  async function run(action: "sync" | "setup-columns" | "reapply") {
++    setBusy(action);
++    setMsg(null);
++    try {
++      const path =
++        action === "sync"
++          ? "/api/funnel/sync"
++          : action === "setup-columns"
++            ? "/api/funnel/setup-columns"
++            : "/api/funnel/reapply";
++      const r = await api.post<{ message: string }>(path);
++      setMsg(r.message);
++      qc.invalidateQueries({ queryKey: ["funnel-status"] });
++    } catch (e: any) {
++      setMsg(e.message || "Request failed");
++    } finally {
++      setBusy(null);
++    }
++  }
++
++  const ready =
++    status?.sheetsConfigured && status?.emailConfigured && status?.geminiConfigured;
++
++  return (
++    <div className="space-y-6">
++      <div className="flex flex-wrap items-start justify-between gap-4">
++        <div>
++          <h1 className="text-2xl font-semibold tracking-tight">Sales Funnel Bot</h1>
++          <p className="text-sm text-muted-foreground">
++            Contained Expo module — unread Gmail quotes → Gemini → Google Sheets (31 columns).
++            Separate from RFQ &quot;Update From Email&quot;.
++          </p>
++        </div>
++        {status?.sheetUrl && (
++          <Button variant="outline" asChild>
++            <a href={status.sheetUrl} target="_blank" rel="noreferrer">
++              <ExternalLink className="h-4 w-4" /> Open Sheet
++            </a>
++          </Button>
++        )}
++      </div>
++
++      <Card>
++        <CardHeader className="pb-2">
++          <CardTitle className="text-sm">Connection status</CardTitle>
++        </CardHeader>
++        <CardContent className="grid gap-3 sm:grid-cols-3">
++          {isLoading ? (
++            <p className="text-sm text-muted-foreground">Checking…</p>
++          ) : (
++            <>
++              <div className="flex items-center gap-2 text-sm">
++                <StatusDot ok={!!status?.sheetsConfigured} />
++                <span>Google Sheets</span>
++                {status?.serviceAccountEmail && (
++                  <Badge variant="secondary" className="max-w-[12rem] truncate text-[10px]">
++                    {status.serviceAccountEmail}
++                  </Badge>
++                )}
++              </div>
++              <div className="flex items-center gap-2 text-sm">
++                <StatusDot ok={!!status?.emailConfigured} />
++                <span>Inbox ({status?.emailUser || "—"})</span>
++              </div>
++              <div className="flex items-center gap-2 text-sm">
++                <StatusDot ok={!!status?.geminiConfigured} />
++                <span>Gemini</span>
++              </div>
++            </>
++          )}
++        </CardContent>
++      </Card>
++
++      <div className="flex flex-wrap gap-2">
++        <Button onClick={() => run("sync")} disabled={!!busy || !ready}>
++          {busy === "sync" ? (
++            <Loader2 className="h-4 w-4 animate-spin" />
++          ) : (
++            <Mail className="h-4 w-4" />
++          )}
++          Sync unread emails
++        </Button>
++        <Button variant="outline" onClick={() => run("setup-columns")} disabled={!!busy || !status?.sheetsConfigured}>
++          {busy === "setup-columns" ? (
++            <Loader2 className="h-4 w-4 animate-spin" />
++          ) : (
++            <Columns3 className="h-4 w-4" />
++          )}
++          Setup 31 columns
++        </Button>
++        <Button variant="outline" onClick={() => run("reapply")} disabled={!!busy || !status?.sheetsConfigured}>
++          {busy === "reapply" ? (
++            <Loader2 className="h-4 w-4 animate-spin" />
++          ) : (
++            <RefreshCw className="h-4 w-4" />
++          )}
++          Reapply rules &amp; sort
++        </Button>
++      </div>
++
++      {msg && (
++        <p className="rounded-lg border bg-muted/40 px-3 py-2 text-sm text-muted-foreground">{msg}</p>
++      )}
++
++      <FunnelRulesPanel />
++    </div>
++  );
++}
+diff --git a/src/features/funnel/rules-panel.tsx b/src/features/funnel/rules-panel.tsx
+new file mode 100644
+index 0000000..1ed2fd4
+--- /dev/null
++++ b/src/features/funnel/rules-panel.tsx
+@@ -0,0 +1,84 @@
++"use client";
++
++import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
++
++export function FunnelRulesPanel() {
++  return (
++    <Card>
++      <CardHeader className="pb-2">
++        <CardTitle className="text-sm">
++          How each column is filled — Extraction &amp; Automation Rules
++        </CardTitle>
++      </CardHeader>
++      <CardContent className="prose prose-sm dark:prose-invert max-w-none space-y-4 text-sm text-muted-foreground">
++        <p>
++          Every row in the funnel sheet is built from these rules. Gemini extracts raw data from the
++          email; then the bot cleans and validates each field before writing it to the sheet.
++        </p>
++
++        <Rule title="Quote ID">
++          Only Exponentia internal IDs like <strong>I835-26</strong> or <strong>F780-23</strong> are
++          accepted. Body only (never subject). Looks near &quot;Add and archive&quot; or a &quot;Quote
++          ID:&quot; label. Partner refs (QTE-…, PID/BID/SP) are rejected.
++        </Rule>
++
++        <Rule title="Opportunity Date">
++          When work actually started — not the first email. Older unrelated scope is ignored; wait-on-customer idle days are excluded.
++        </Rule>
++
++        <Rule title="Proposal Date">
++          When our team sent the final pricing response. Falls back to Opportunity Date if none yet.
++        </Rule>
++
++        <Rule title="Partner Name">
++          External company requesting the quote — never &quot;Exponentia Global.&quot; Falls back to sender domain.
++        </Rule>
++
++        <Rule title="End Customer">Final client org. Defaults to <strong>Unknown</strong>.</Rule>
++
++        <Rule title="Site B / Site B City">
++          Forced to <strong>-</strong> for Internet / DIA / BIA.
++        </Rule>
++
++        <Rule title="Technology">
++          DIA/BIA → Internet · L2VPN/MPLS/EVPL → Ethernet · IPLC/IEPL/EoSDH/DPLC/DEPL → TDM ·
++          Colocation+PWR → Datacenter · Cross Connects/Equipment/Field Support → Managed Services /
++          Hardware.
++        </Rule>
++
++        <Rule title="Contract Term">
++          Always in months (e.g. 12 Months). Multiple terms produce separate rows.
++        </Rule>
++
++        <Rule title="Status / Sub-status">New rows are always <strong>OPEN</strong> / <strong>MEDIUM</strong>.</Rule>
++
++        <Rule title="TAT">
++          Business days between Opportunity and Proposal — excluding weekends and Pakistan public
++          holidays (<code>holidays.json</code>).
++        </Rule>
++
++        <Rule title="LM Infra Details">Exactly <strong>Fiber</strong> or <strong>Wireless</strong>. Default Fiber.</Rule>
++
++        <Rule title="Protection / XC">
++          Last mile &amp; wet segment: Protected / Unprotected / N/A. XC: Included / Excluded / N/A;
++          Internet → always -.
++        </Rule>
++
++        <Rule title="Holidays">
++          Count of Pakistan weekday public holidays in the Opportunity → Proposal range.
++        </Rule>
++
++        <Rule title="Offered Us">New Service / Renewal / Upgrade. Default: New Service.</Rule>
++      </CardContent>
++    </Card>
++  );
++}
++
++function Rule({ title, children }: { title: string; children: React.ReactNode }) {
++  return (
++    <div>
++      <h3 className="mb-1 text-sm font-medium text-foreground">{title}</h3>
++      <p className="m-0 leading-relaxed">{children}</p>
++    </div>
++  );
++}
+diff --git a/src/lib/funnel/__tests__/funnel.test.ts b/src/lib/funnel/__tests__/funnel.test.ts
+new file mode 100644
+index 0000000..6ef0407
+--- /dev/null
++++ b/src/lib/funnel/__tests__/funnel.test.ts
+@@ -0,0 +1,42 @@
++import { describe, it, expect } from "vitest";
++import { findExponentiaQuoteIdsInText, normalizeQuoteId } from "@/lib/funnel/quote-id";
++import { computeTatFromDates, loadPublicHolidays } from "@/lib/funnel/tat";
++import { resolveTechnology, normalizeLmInfra, normalizePartnerName } from "@/lib/funnel/normalizers";
++
++describe("funnel quote-id", () => {
++  it("prefers Quote ID label in tip over subject-like refs", () => {
++    const body = `Hi team\nQuote ID: I835-26\npls add & archive\n\nFrom: someone\nSubject: QTE-260713-12907`;
++    expect(normalizeQuoteId("QTE-260713", body)).toBe("I835-26");
++  });
++
++  it("ignores Reference taken from older IDs when newer label present", () => {
++    const body = `Quote ID: I837-26\nReference taken from I829-26`;
++    expect(findExponentiaQuoteIdsInText(body)[0]).toBe("I837-26");
++  });
++});
++
++describe("funnel tat", () => {
++  it("excludes weekends and counts holidays", () => {
++    const holidays = loadPublicHolidays();
++    // 2026-03-20 Fri → 2026-03-24 Tue includes Eid weekend holidays
++    const start = new Date(2026, 2, 20);
++    const end = new Date(2026, 2, 24);
++    const { tat, holidayCount } = computeTatFromDates(start, end, holidays);
++    expect(holidayCount).toBeGreaterThan(0);
++    expect(tat).toBeGreaterThanOrEqual(0);
++  });
++});
++
++describe("funnel normalizers", () => {
++  it("maps DIA to Internet", () => {
++    expect(resolveTechnology("DIA", "Ethernet")).toBe("Internet");
++  });
++
++  it("maps wireless media", () => {
++    expect(normalizeLmInfra("microwave radio")).toBe("Wireless");
++  });
++
++  it("never keeps Exponentia as partner when sender is external", () => {
++    expect(normalizePartnerName("Exponentia Global", "Jane <jane@cmcnetworks.net>")).toBe("Jane");
++  });
++});
+diff --git a/src/lib/funnel/constants.ts b/src/lib/funnel/constants.ts
+new file mode 100644
+index 0000000..8921629
+--- /dev/null
++++ b/src/lib/funnel/constants.ts
+@@ -0,0 +1,71 @@
++/** Contained Sales Funnel Bot — constants (ported from Expo Streamlit app). */
++
++export const FUNNEL_SCOPES = [
++  "https://www.googleapis.com/auth/spreadsheets",
++  "https://www.googleapis.com/auth/drive",
++] as const;
++
++export const DEFAULT_SPREADSHEET_ID =
++  process.env.FUNNEL_SPREADSHEET_ID || "1E9gYdeZUwMEmnwe164io7E47QuXnBfYcELdulUroN_4";
++
++export const FUNNEL_WORKSHEET_GID = Number(process.env.FUNNEL_WORKSHEET_GID || 0);
++
++export const SHEET_URL = `https://docs.google.com/spreadsheets/d/${DEFAULT_SPREADSHEET_ID}/edit#gid=${FUNNEL_WORKSHEET_GID}`;
++
++export const SHEET_DATE_FORMAT = "dd-MMMM-yyyy"; // date-fns pattern ≈ 19-May-2026
++export const SHEET_DATE_COLUMN_INDICES = [2, 15] as const; // Opportunity, Proposal
++export const FUNNEL_COL_LM_INFRA = "Z";
++
++export const FUNNEL_COLUMN_HEADERS = [
++  "S.NO",
++  "Quote ID",
++  "Opportunity date",
++  "Partner name",
++  "End customer",
++  "Site A",
++  "Site A City",
++  "Site B",
++  "Site B city",
++  "Technology",
++  "Service/Products",
++  "Capacity/Quantity",
++  "NRC",
++  "MRC",
++  "Mode of Communication",
++  "Proposal Date",
++  "Contract Term",
++  "Sales Effort by",
++  "Comments",
++  "Status",
++  "Sub-status",
++  "POC",
++  "Contact Email Address",
++  "TAT",
++  "On-Net/ Off-Net",
++  "LM Infra details",
++  "Last mile protection",
++  "Wet Segment protection status",
++  "XC included/excluded",
++  "Holidays",
++  "Offered us",
++] as const;
++
++export const FUNNEL_COLUMN_COUNT = FUNNEL_COLUMN_HEADERS.length;
++
++export const MEDIA_FIBER = "Fiber";
++export const MEDIA_WIRELESS = "Wireless";
++export const DEFAULT_END_CUSTOMER = "Unknown";
++export const DEFAULT_ON_NET = "On-Net";
++export const DEFAULT_OFFERED_US = "New Service";
++
++export const EXPONENTIA_NAMES = [
++  "exponentia global",
++  "exponentia",
++  "exponentiaglobal",
++  "exponentia global llc",
++] as const;
++
++export const EXPONENTIA_EMAIL_DOMAINS = [
++  "exponentiaglobal.com",
++  "exponentia.com",
++] as const;
+diff --git a/src/lib/funnel/dates.ts b/src/lib/funnel/dates.ts
+new file mode 100644
+index 0000000..6c15bc4
+--- /dev/null
++++ b/src/lib/funnel/dates.ts
+@@ -0,0 +1,138 @@
++/** Sheet date parse/format helpers (dd-Month-yyyy, e.g. 19-May-2026). */
++
++import { format, parse, isValid } from "date-fns";
++import { SHEET_DATE_FORMAT } from "./constants";
++import { computeTatFromDates, loadPublicHolidays } from "./tat";
++
++const PARSE_FORMATS = [
++  SHEET_DATE_FORMAT, // dd-MMMM-yyyy
++  "MMMM, dd'' yy",
++  "MMMM d, yyyy",
++  "yyyy-MM-dd",
++  "MMMM-dd-yyyy",
++  "MMMM-dd-yy",
++  "MMM-dd-yy",
++  "MM/dd/yyyy",
++  "dd/MM/yyyy",
++  "dd-MMM-yyyy",
++  "d MMMM yyyy",
++];
++
++const EXCEL_EPOCH = new Date(1899, 11, 30);
++
++export function colIndexToLetter(index: number): string {
++  let n = index + 1;
++  let letters = "";
++  while (n) {
++    const remainder = (n - 1) % 26;
++    letters = String.fromCharCode(65 + remainder) + letters;
++    n = Math.floor((n - 1) / 26);
++  }
++  return letters;
++}
++
++export function parseSheetDateValue(value: unknown): Date | null {
++  if (value == null) return null;
++  if (value instanceof Date && isValid(value)) return value;
++  if (typeof value === "number" && Number.isFinite(value)) {
++    const d = new Date(EXCEL_EPOCH.getTime() + value * 86400000);
++    return isValid(d) ? d : null;
++  }
++
++  const text = String(value).trim();
++  if (!text || text === "-") return null;
++
++  if (/^\d+(\.\d+)?$/.test(text)) {
++    const d = new Date(EXCEL_EPOCH.getTime() + Number(text) * 86400000);
++    if (isValid(d)) return d;
++  }
++
++  for (const fmt of PARSE_FORMATS) {
++    try {
++      const d = parse(text, fmt, new Date());
++      if (isValid(d)) return d;
++    } catch {
++      /* try next */
++    }
++  }
++  return null;
++}
++
++export function formatSheetDate(value: unknown): string {
++  if (value == null) return "-";
++  const parsed = value instanceof Date ? value : parseSheetDateValue(value);
++  if (parsed && isValid(parsed)) return format(parsed, SHEET_DATE_FORMAT);
++  const text = String(value).trim();
++  return text || "-";
++}
++
++export function computeTatFromDateStrings(
++  oppRaw: unknown,
++  propRaw: unknown,
++  holidays?: Set<string>
++): {
++  oppFormatted: string | null;
++  propFormatted: string | null;
++  tat: number;
++  holidayCount: number;
++} {
++  const opp = parseSheetDateValue(oppRaw);
++  const prop = parseSheetDateValue(propRaw);
++  if (!opp || !prop) {
++    return { oppFormatted: null, propFormatted: null, tat: 0, holidayCount: 0 };
++  }
++  const { tat, holidayCount } = computeTatFromDates(opp, prop, holidays);
++  return {
++    oppFormatted: format(opp, SHEET_DATE_FORMAT),
++    propFormatted: format(prop, SHEET_DATE_FORMAT),
++    tat,
++    holidayCount,
++  };
++}
++
++/** Parse Gemini YYYY-MM-DD (or fallback formats) into sheet dates + TAT. */
++export function formatAiSheetDates(
++  oppStr: unknown,
++  propStr: unknown,
++  holidays?: Set<string>
++): { oppFormatted: string; propFormatted: string; tat: number; holidayCount: number } {
++  const holidaySet = holidays ?? loadPublicHolidays();
++  const nowFmt = format(new Date(), SHEET_DATE_FORMAT);
++  const oppText = String(oppStr ?? "").trim();
++  const propText = String(propStr ?? "").trim();
++
++  try {
++    if (/^\d{4}-\d{2}-\d{2}$/.test(oppText) && /^\d{4}-\d{2}-\d{2}$/.test(propText)) {
++      const opp = parse(oppText, "yyyy-MM-dd", new Date());
++      const prop = parse(propText, "yyyy-MM-dd", new Date());
++      if (isValid(opp) && isValid(prop)) {
++        const { tat, holidayCount } = computeTatFromDates(opp, prop, holidaySet);
++        return {
++          oppFormatted: format(opp, SHEET_DATE_FORMAT),
++          propFormatted: format(prop, SHEET_DATE_FORMAT),
++          tat,
++          holidayCount,
++        };
++      }
++    }
++  } catch {
++    /* fall through */
++  }
++
++  const fallback = computeTatFromDateStrings(oppStr, propStr, holidaySet);
++  if (fallback.oppFormatted != null) {
++    return {
++      oppFormatted: fallback.oppFormatted,
++      propFormatted: fallback.propFormatted!,
++      tat: fallback.tat,
++      holidayCount: fallback.holidayCount,
++    };
++  }
++
++  return {
++    oppFormatted: oppText ? formatSheetDate(oppText) : nowFmt,
++    propFormatted: propText ? formatSheetDate(propText) : nowFmt,
++    tat: 0,
++    holidayCount: 0,
++  };
++}
+diff --git a/src/lib/funnel/gemini.ts b/src/lib/funnel/gemini.ts
+new file mode 100644
+index 0000000..d4d91dd
+--- /dev/null
++++ b/src/lib/funnel/gemini.ts
+@@ -0,0 +1,197 @@
++/** Funnel Gemini extraction (Expo 16-rule prompt + circuits schema). */
++
++import { GoogleGenerativeAI, SchemaType, type ResponseSchema } from "@google/generative-ai";
++
++const MODEL = process.env.FUNNEL_GEMINI_MODEL || process.env.GEMINI_MODEL || "gemini-2.0-flash";
++const RETRY_LIMIT_MS = 60_000;
++
++export interface FunnelCircuit {
++  "Quote ID"?: string;
++  "Opportunity Date"?: string;
++  "Proposal Date"?: string;
++  "Partner Name"?: string;
++  "End Customer"?: string;
++  "Site A"?: string;
++  "Site A City"?: string;
++  "Site B"?: string;
++  "Site B City"?: string;
++  Technology?: string;
++  "Service/Product"?: string;
++  "Capacity / Quantity"?: string;
++  NRC?: string;
++  MRC?: string;
++  "Contract Terms"?: string;
++  "Sales Effort By"?: string;
++  Comments?: string;
++  POC?: string;
++  "Contact Email Address"?: string;
++  "On-Net/Off-Net"?: string;
++  "LM Infra Details"?: string;
++  "Last Mile Protection"?: string;
++  "Wet Segment Protection"?: string;
++  "XC Included/Excluded"?: string;
++  "Offered Us"?: string;
++}
++
++export interface FunnelExtraction {
++  circuits: FunnelCircuit[];
++}
++
++const CIRCUITS_SCHEMA: ResponseSchema = {
++  type: SchemaType.OBJECT,
++  properties: {
++    circuits: {
++      type: SchemaType.ARRAY,
++      items: {
++        type: SchemaType.OBJECT,
++        properties: {
++          "Quote ID": { type: SchemaType.STRING },
++          "Opportunity Date": { type: SchemaType.STRING },
++          "Proposal Date": { type: SchemaType.STRING },
++          "Partner Name": { type: SchemaType.STRING },
++          "End Customer": { type: SchemaType.STRING },
++          "Site A": { type: SchemaType.STRING },
++          "Site A City": { type: SchemaType.STRING },
++          "Site B": { type: SchemaType.STRING },
++          "Site B City": { type: SchemaType.STRING },
++          Technology: { type: SchemaType.STRING },
++          "Service/Product": { type: SchemaType.STRING },
++          "Capacity / Quantity": { type: SchemaType.STRING },
++          NRC: { type: SchemaType.STRING },
++          MRC: { type: SchemaType.STRING },
++          "Contract Terms": { type: SchemaType.STRING },
++          "Sales Effort By": { type: SchemaType.STRING },
++          Comments: { type: SchemaType.STRING },
++          POC: { type: SchemaType.STRING },
++          "Contact Email Address": { type: SchemaType.STRING },
++          "On-Net/Off-Net": { type: SchemaType.STRING },
++          "LM Infra Details": { type: SchemaType.STRING },
++          "Last Mile Protection": { type: SchemaType.STRING },
++          "Wet Segment Protection": { type: SchemaType.STRING },
++          "XC Included/Excluded": { type: SchemaType.STRING },
++          "Offered Us": { type: SchemaType.STRING },
++        },
++        required: [
++          "Quote ID",
++          "Opportunity Date",
++          "Proposal Date",
++          "Partner Name",
++          "Technology",
++          "Service/Product",
++          "Capacity / Quantity",
++          "NRC",
++          "MRC",
++          "LM Infra Details",
++        ],
++      },
++    },
++  },
++  required: ["circuits"],
++};
++
++function buildPrompt(emailBody: string, emailUser: string): string {
++  return `
++    You are an expert telecom data verification engine. Analyze the email thread and extract quoting matrix rows into clean structured objects.
++
++    CRITICAL ALIGNMENT & TAXONOMY RULES:
++    1. Quote ID (STRICT — Exponentia internal tracking ONLY):
++       - MUST match EXACTLY ^[IF][0-9]{1,5}-[0-9]{2}$ — only forms like 'I835-26', 'I673-26', 'F780-23', 'I698-26'.
++       - Source: ONLY the email BODY (never the Subject line). Look in the newest tip for 'Add and archive' / 'Add & archive' / 'Quote ID: I###-##'.
++       - NEVER use Subject-line tokens such as 'QTE-260713-12907-6128b' or '20260710081136-5'.
++       - NEVER use older 'Reference taken from I###-##' IDs, earlier thread Quote IDs, or any partner/system RFQ refs (QTE-*, long numeric IDs, PID/BID/SP).
++       - If one email has multiple priced circuits/rows, repeat that SAME Exponentia Quote ID on every circuit object.
++
++    2. Opportunity Date (HYPER-MINIMAL TAT LOGIC):
++       - OBJECTIVE: Calculate the absolute lowest logically defensible Turnaround Time (TAT) for our sales engineering execution.
++       - RULE A (Scope Isolation): Look at the exact circuits listed in the final pricing table. If the email thread began days or weeks earlier discussing a completely different country, city, or independent RFQ scope, you MUST completely ignore those older dates.
++       - RULE B (The Actionable Milestone Pivot): Do NOT default to the initial incoming email if our team was operationally blocked. If our team replied asking for missing prerequisites (like LPOC details, specific customer names, or explicit capacities) to proceed, the clock does NOT start at the beginning. Instead, set the 'Opportunity Date' to the exact date when the requirement became actively scoped, or when the customer provided the final clarity needed to process the engineering feasibility.
++       - RULE C (Eliminate Trailing Idle Days): Ensure no dead time spent waiting on customer definition parameters is unfairly charged against our turnaround performance metric.
++       - Format strictly as YYYY-MM-DD.
++
++    3. Proposal Date: Contextually find the date/timestamp when our team (${emailUser}) sent the final completed pricing/proposal response. If no pricing has been sent yet, fallback to the opportunity date. Format strictly as YYYY-MM-DD.
++
++    4. Capacity / Quantity: State the metric unit explicitly (e.g., '50 Mbps', '20 Gbps').
++    5. Currency Formatting: Ensure NRC and MRC fields include the '$' symbol and correct commas (e.g., '$1,500.00'). If none, write '-'.
++    6. Strict Tech/Service Taxonomy Mapping:
++       - If Service is DIA or BIA -> Technology MUST be 'Internet'
++       - If Service is L2VPN, MPLS, or EVPL Linear -> Technology MUST be 'Ethernet'
++       - If Service is IPLC, IEPL, EoSDH, DPLC, or DEPL -> Technology MUST be 'TDM'
++       - If Service is Colocation + PWR -> Technology MUST be 'Datacenter'
++       - If Service is Cross Connects, Equipment, or Field Support -> Technology MUST be 'Managed Services / Hardware'
++    7. End Customer: The final client organization the partner is quoting for (e.g., 'Baker Hughes'). If not mentioned anywhere, use 'Unknown'.
++    8. On-Net/Off-Net: If the email does not explicitly state off-net, use 'On-Net'.
++    9. Contract Terms: ALWAYS express duration in months with the word 'Months' (e.g., '12 Months', '24 Months', '36 Months'). Never use years-only labels.
++       - If a single table row lists multiple contract terms (e.g. columns for 12, 24, and 36 months), output a SEPARATE object for EACH term.
++    10. LM Infra Details (column after On-Net/Off-Net): MUST be exactly 'Fiber' or 'Wireless' — the last-mile physical media type. NEVER put terms & conditions, contract text, SLAs, or unrelated notes here.
++    11. Last Mile Protection: MUST be exactly one of 'Protected', 'Unprotected', or 'N/A'.
++    12. Wet Segment Protection: MUST be exactly one of 'Protected', 'Unprotected', or 'N/A'. This is protection status only — NOT fiber/wireless media.
++    13. XC Included/Excluded: Cross-connect status — exactly one of 'Included', 'Excluded', or 'N/A'. For Internet/DIA/BIA services, this must be set strictly to '-'.
++    14. Offered Us: What we offered (e.g., 'New Service', 'Renewal', 'Upgrade'). Default to 'New Service' if unclear.
++    15. Partner Name vs End Customer:
++       - Partner Name: The external entity emailing Exponentia Global to request a quote (e.g., 'Noor Data Network'). NEVER set this to 'Exponentia Global'.
++    16. Site B & Site B City for Internet: If Technology or Service is Internet/DIA/BIA, set both 'Site B' and 'Site B City' fields strictly to '-'.
++
++    EMAIL THREAD FOR PROCESSING:
++    ${emailBody}
++    `;
++}
++
++function isRetryableGeminiError(err: unknown): boolean {
++  const s = String(err).toUpperCase();
++  return ["503", "UNAVAILABLE", "429", "RESOURCE_EXHAUSTED"].some((t) => s.includes(t));
++}
++
++function sleep(ms: number) {
++  return new Promise((r) => setTimeout(r, ms));
++}
++
++export function funnelGeminiConfigured(): boolean {
++  return !!process.env.GEMINI_API_KEY;
++}
++
++export async function extractFunnelCircuits(
++  emailBody: string,
++  emailUser: string
++): Promise<FunnelExtraction> {
++  const key = process.env.GEMINI_API_KEY;
++  if (!key) throw new Error("GEMINI_API_KEY is not configured");
++
++  const ai = new GoogleGenerativeAI(key);
++  const model = ai.getGenerativeModel({
++    model: MODEL,
++    generationConfig: {
++      responseMimeType: "application/json",
++      responseSchema: CIRCUITS_SCHEMA,
++      temperature: 0.2,
++    },
++  });
++
++  const prompt = buildPrompt(emailBody, emailUser);
++  const started = Date.now();
++  let attempt = 0;
++
++  while (Date.now() - started < RETRY_LIMIT_MS) {
++    try {
++      const res = await model.generateContent(prompt);
++      const text = res.response.text();
++      const parsed = JSON.parse(text) as FunnelExtraction;
++      let circuits = parsed?.circuits ?? [];
++      if (!Array.isArray(circuits) && circuits && typeof circuits === "object") {
++        circuits = [circuits as FunnelCircuit];
++      }
++      return { circuits: Array.isArray(circuits) ? circuits : [] };
++    } catch (err) {
++      if (!isRetryableGeminiError(err)) throw err;
++      const elapsed = Date.now() - started;
++      const remaining = RETRY_LIMIT_MS - elapsed;
++      if (remaining <= 0) throw err;
++      const wait = Math.min(5000 + attempt * 2000, remaining);
++      attempt += 1;
++      await sleep(wait);
++    }
++  }
++
++  throw new Error(
++    "Gemini Engine overloaded. System timed out automatically after retrying for 1 minute."
++  );
++}
+diff --git a/src/lib/funnel/gmail.ts b/src/lib/funnel/gmail.ts
+new file mode 100644
+index 0000000..d5b56d5
+--- /dev/null
++++ b/src/lib/funnel/gmail.ts
+@@ -0,0 +1,174 @@
++/**
++ * Funnel inbox: fetch ALL unread emails (Expo-style), not only "Solution Request".
++ * Reuses IMAP_* or Gmail OAuth credentials already configured for RFQEG.
++ */
++
++import { ImapFlow } from "imapflow";
++import { simpleParser } from "mailparser";
++import { google } from "googleapis";
++import { gmailConfigured } from "@/lib/gmail";
++import { imapConfigured } from "@/lib/email-imap";
++
++export interface FunnelEmailMessage {
++  id: string;
++  from: string;
++  subject: string;
++  /** Prefer text/plain; subject is never included (Quote ID is body-only). */
++  body: string;
++  date: Date | null;
++}
++
++function stripHtml(html: string): string {
++  return html
++    .replace(/<(script|style)[\s\S]*?<\/\1>/gi, " ")
++    .replace(/<br\s*\/?>/gi, "\n")
++    .replace(/<\/p>/gi, "\n")
++    .replace(/<[^>]+>/g, " ")
++    .replace(/[ \t]+\n/g, "\n")
++    .replace(/\n{3,}/g, "\n\n");
++}
++
++export function funnelEmailConfigured(): boolean {
++  return imapConfigured() || gmailConfigured();
++}
++
++export function funnelEmailUser(): string {
++  return process.env.IMAP_USER || process.env.GMAIL_USER || "sales";
++}
++
++function makeImapClient() {
++  return new ImapFlow({
++    host: process.env.IMAP_HOST || "imap.gmail.com",
++    port: Number(process.env.IMAP_PORT || 993),
++    secure: true,
++    auth: { user: process.env.IMAP_USER!, pass: process.env.IMAP_PASSWORD! },
++    logger: false,
++  });
++}
++
++async function fetchUnreadImap(): Promise<FunnelEmailMessage[]> {
++  const client = makeImapClient();
++  const out: FunnelEmailMessage[] = [];
++  await client.connect();
++  try {
++    const lock = await client.getMailboxLock("INBOX");
++    try {
++      const uids = await client.search({ seen: false }, { uid: true });
++      const ids = Array.isArray(uids) ? uids : [];
++      for (const uid of ids) {
++        const msg = await client.fetchOne(String(uid), { source: true, envelope: true }, { uid: true });
++        if (!msg || !("source" in msg) || !msg.source) continue;
++        const parsed = await simpleParser(msg.source as Buffer);
++        const plain = parsed.text?.toString() || "";
++        const html = parsed.html ? String(parsed.html) : "";
++        const body = (plain || (html ? stripHtml(html) : "")).trim();
++        out.push({
++          id: String(uid),
++          from: parsed.from?.text || "",
++          subject: parsed.subject || "",
++          body: body.slice(0, 50000),
++          date: parsed.date || null,
++        });
++      }
++    } finally {
++      lock.release();
++    }
++  } finally {
++    await client.logout().catch(() => {});
++  }
++  return out;
++}
++
++async function markReadImap(uid: string): Promise<void> {
++  const client = makeImapClient();
++  await client.connect();
++  try {
++    const lock = await client.getMailboxLock("INBOX");
++    try {
++      await client.messageFlagsAdd(uid, ["\\Seen"], { uid: true });
++    } finally {
++      lock.release();
++    }
++  } finally {
++    await client.logout().catch(() => {});
++  }
++}
++
++function gmailOauthClient() {
++  const oauth2 = new google.auth.OAuth2(
++    process.env.GMAIL_CLIENT_ID,
++    process.env.GMAIL_CLIENT_SECRET,
++    process.env.GMAIL_REDIRECT_URI
++  );
++  oauth2.setCredentials({ refresh_token: process.env.GMAIL_REFRESH_TOKEN });
++  return google.gmail({ version: "v1", auth: oauth2 });
++}
++
++function decodeGmailBody(payload: any): string {
++  if (!payload) return "";
++  const plain: string[] = [];
++  const html: string[] = [];
++  const walk = (part: any) => {
++    if (part.body?.data) {
++      const text = Buffer.from(part.body.data, "base64").toString("utf8");
++      if (part.mimeType === "text/plain") plain.push(text);
++      else if (part.mimeType === "text/html") html.push(text);
++    }
++    if (part.parts) for (const p of part.parts) walk(p);
++  };
++  walk(payload);
++  if (plain.length) return plain.join("\n");
++  if (html.length) return stripHtml(html.join("\n"));
++  return "";
++}
++
++function header(headers: any[], name: string): string {
++  return headers?.find((h) => h.name.toLowerCase() === name.toLowerCase())?.value || "";
++}
++
++async function fetchUnreadGmail(): Promise<FunnelEmailMessage[]> {
++  const gmail = gmailOauthClient();
++  const user = process.env.GMAIL_USER || "me";
++  const list = await gmail.users.messages.list({
++    userId: user,
++    q: "is:unread",
++    maxResults: 50,
++  });
++  const ids = (list.data.messages || []).map((m) => m.id!).filter(Boolean);
++  const out: FunnelEmailMessage[] = [];
++  for (const id of ids) {
++    const msg = await gmail.users.messages.get({ userId: user, id, format: "full" });
++    const payload = msg.data.payload;
++    const headers = payload?.headers || [];
++    out.push({
++      id,
++      from: header(headers, "From"),
++      subject: header(headers, "Subject"),
++      body: decodeGmailBody(payload).slice(0, 50000),
++      date: msg.data.internalDate ? new Date(Number(msg.data.internalDate)) : null,
++    });
++  }
++  return out;
++}
++
++async function markReadGmail(id: string): Promise<void> {
++  const gmail = gmailOauthClient();
++  const user = process.env.GMAIL_USER || "me";
++  await gmail.users.messages.modify({
++    userId: user,
++    id,
++    requestBody: { removeLabelIds: ["UNREAD"] },
++  });
++}
++
++/** Prefer IMAP when configured (matches Expo Gmail app-password flow). */
++export async function fetchUnreadFunnelEmails(): Promise<FunnelEmailMessage[]> {
++  if (imapConfigured()) return fetchUnreadImap();
++  if (gmailConfigured()) return fetchUnreadGmail();
++  throw new Error("Email not configured (set IMAP_* or GMAIL_* env vars)");
++}
++
++export async function markFunnelEmailRead(id: string): Promise<void> {
++  if (imapConfigured()) return markReadImap(id);
++  if (gmailConfigured()) return markReadGmail(id);
++}
+diff --git a/src/lib/funnel/holidays.json b/src/lib/funnel/holidays.json
+new file mode 100644
+index 0000000..c413e1b
+--- /dev/null
++++ b/src/lib/funnel/holidays.json
+@@ -0,0 +1,37 @@
++{
++  "year": 2026,
++  "country": "Pakistan",
++  "_comment": "Official Pakistan public holidays for TAT. Weekends (Sat/Sun) are excluded separately. Lunar holidays use these projected calendar dates.",
++  "dates": [
++    "2026-02-05",
++    "2026-03-21",
++    "2026-03-22",
++    "2026-03-23",
++    "2026-05-01",
++    "2026-05-27",
++    "2026-05-28",
++    "2026-05-29",
++    "2026-06-24",
++    "2026-06-25",
++    "2026-08-14",
++    "2026-08-25",
++    "2026-11-09",
++    "2026-12-25"
++  ],
++  "holidays": [
++    { "date": "2026-02-05", "name": "Kashmir Solidarity Day" },
++    { "date": "2026-03-21", "name": "Eid-ul-Fitr" },
++    { "date": "2026-03-22", "name": "Eid-ul-Fitr" },
++    { "date": "2026-03-23", "name": "Eid-ul-Fitr / Pakistan Day" },
++    { "date": "2026-05-01", "name": "Labour Day" },
++    { "date": "2026-05-27", "name": "Eid-ul-Azha" },
++    { "date": "2026-05-28", "name": "Eid-ul-Azha / Youm-e-Takbeer" },
++    { "date": "2026-05-29", "name": "Eid-ul-Azha" },
++    { "date": "2026-06-24", "name": "Ashura (9th Muharram)" },
++    { "date": "2026-06-25", "name": "Ashura (10th Muharram)" },
++    { "date": "2026-08-14", "name": "Independence Day" },
++    { "date": "2026-08-25", "name": "Eid Milad-un-Nabi" },
++    { "date": "2026-11-09", "name": "Allama Iqbal Day" },
++    { "date": "2026-12-25", "name": "Quaid-e-Azam Day / Christmas" }
++  ]
++}
+diff --git a/src/lib/funnel/index.ts b/src/lib/funnel/index.ts
+new file mode 100644
+index 0000000..01853db
+--- /dev/null
++++ b/src/lib/funnel/index.ts
+@@ -0,0 +1,11 @@
++/** Contained Sales Funnel Bot module (ported from Expo Streamlit app). */
++
++export * from "./constants";
++export * from "./quote-id";
++export * from "./normalizers";
++export * from "./tat";
++export * from "./dates";
++export * from "./gemini";
++export * from "./gmail";
++export * from "./sheets";
++export * from "./sync";
+diff --git a/src/lib/funnel/normalizers.ts b/src/lib/funnel/normalizers.ts
+new file mode 100644
+index 0000000..0b922f7
+--- /dev/null
++++ b/src/lib/funnel/normalizers.ts
+@@ -0,0 +1,165 @@
++/** Field normalizers for Sales Funnel Bot (ported from Expo). */
++
++import {
++  MEDIA_FIBER,
++  MEDIA_WIRELESS,
++  DEFAULT_END_CUSTOMER,
++  DEFAULT_ON_NET,
++  DEFAULT_OFFERED_US,
++  EXPONENTIA_NAMES,
++  EXPONENTIA_EMAIL_DOMAINS,
++} from "./constants";
++
++export function parseCurrencyNumber(value: unknown): number | null {
++  if (value == null) return null;
++  const text = String(value).trim();
++  if (!text || text === "-") return null;
++  const cleaned = text.replace(/,/g, "").replace(/[^\d.\-]/g, "");
++  if (!cleaned || cleaned === "." || cleaned === "-" || cleaned === "-.") return null;
++  const n = Number(cleaned);
++  return Number.isFinite(n) ? n : null;
++}
++
++export function formatCurrency(value: unknown): number | string {
++  const num = parseCurrencyNumber(value);
++  if (num != null) return num;
++  const text = value != null ? String(value).trim() : "-";
++  if (!text || text === "-") return "-";
++  if (text.includes("$")) return text;
++  return `$${text}`;
++}
++
++export function normalizeLmInfra(value: unknown, fallbackText?: unknown): string {
++  const combined = [value, fallbackText].map((p) => String(p ?? "")).join(" ").toLowerCase();
++  const wirelessHints = ["wireless", "radio", "microwave", "wifi", "wi-fi", "lte", "5g", "4g", "fixed wireless", "airfiber"];
++  const fiberHints = ["fiber", "fibre", "ftth", "fttx", "fttp", "dark fiber", "pon", "gpon"];
++  const termsHints = ["terms", "condition", "contract", "liability", "warranty", "sla", "payment", "validity", "quote valid"];
++
++  if (termsHints.some((h) => combined.includes(h)) && !wirelessHints.concat(fiberHints).some((h) => combined.includes(h))) {
++    return MEDIA_FIBER;
++  }
++  if (wirelessHints.some((h) => combined.includes(h))) return MEDIA_WIRELESS;
++  if (fiberHints.some((h) => combined.includes(h))) return MEDIA_FIBER;
++
++  const text = String(value ?? "").trim();
++  if (text === MEDIA_FIBER || text === MEDIA_WIRELESS) return text;
++  if (["fiber", "fibre"].includes(text.toLowerCase())) return MEDIA_FIBER;
++  if (text.toLowerCase() === "wireless") return MEDIA_WIRELESS;
++  return MEDIA_FIBER;
++}
++
++export function normalizeEndCustomer(value: unknown): string {
++  const text = String(value ?? "").trim();
++  if (!text || text === "-") return DEFAULT_END_CUSTOMER;
++  return text;
++}
++
++export function normalizeOnNetStatus(value: unknown): string {
++  const text = String(value ?? "").trim();
++  if (!text || text === "-") return DEFAULT_ON_NET;
++  const compact = text.toLowerCase().replace(/[^a-z0-9]/g, "");
++  if (compact.includes("offnet") || compact === "off") return "Off-Net";
++  if (compact.includes("onnet") || compact === "on") return DEFAULT_ON_NET;
++  return text;
++}
++
++export function normalizeContractTerm(value: unknown): string {
++  const text = String(value ?? "").trim();
++  if (!text || text === "-") return "-";
++  if (/month/i.test(text)) {
++    const match = text.match(/(\d+)/);
++    return match ? `${match[1]} Months` : text;
++  }
++  const match = text.match(/(\d+)/);
++  if (match) return `${match[1]} Months`;
++  return `${text} Months`;
++}
++
++export function normalizeProtectionStatus(value: unknown, defaultValue = "N/A"): string {
++  const text = String(value ?? "").trim();
++  if (!text || text === "-") return defaultValue;
++  const lower = text.toLowerCase();
++  if (["n/a", "na", "not applicable"].includes(lower)) return "N/A";
++  if (lower.includes("unprotect") || ["no", "n", "unprotected"].includes(lower)) return "Unprotected";
++  if (lower.includes("protect") || ["yes", "y", "protected"].includes(lower)) return "Protected";
++  return defaultValue;
++}
++
++export function normalizeXcStatus(value: unknown, defaultValue = "N/A"): string {
++  const text = String(value ?? "").trim();
++  if (!text || text === "-") return defaultValue;
++  const lower = text.toLowerCase();
++  if (["n/a", "na", "not applicable"].includes(lower)) return "N/A";
++  if (lower.includes("exclud")) return "Excluded";
++  if (lower.includes("includ")) return "Included";
++  return defaultValue;
++}
++
++export function normalizeOfferedUs(value: unknown): string {
++  const text = String(value ?? "").trim();
++  return text && text !== "-" ? text : DEFAULT_OFFERED_US;
++}
++
++export function resolveTechnology(serviceRaw: unknown, techRaw: unknown): string {
++  const serviceNorm = String(serviceRaw ?? "").trim().toUpperCase();
++  const techNorm = String(techRaw ?? "-").trim();
++  if (serviceNorm === "DIA" || serviceNorm === "BIA") return "Internet";
++  if (serviceNorm === "L2VPN" || serviceNorm === "MPLS" || serviceNorm.includes("EVPL")) return "Ethernet";
++  if (["IPLC", "IEPL", "EOSDH", "DPLC", "DEPL"].includes(serviceNorm)) return "TDM";
++  if (serviceNorm === "COLOCATION + PWR") return "Datacenter";
++  if (["CROSS CONNECT", "EQUIPMENT", "FIELD SUPPORT"].some((h) => serviceNorm.includes(h))) {
++    return "Managed Services / Hardware";
++  }
++  return techNorm || "-";
++}
++
++export function isExponentiaName(value: unknown): boolean {
++  if (!value) return false;
++  const normalized = String(value).toLowerCase().replace(/[^a-z0-9]+/g, " ").trim();
++  return EXPONENTIA_NAMES.some((name) => normalized.includes(name) || name.includes(normalized));
++}
++
++export function isExponentiaEmail(emailAddress: unknown): boolean {
++  if (!emailAddress) return false;
++  const address = String(emailAddress).toLowerCase().trim();
++  return EXPONENTIA_EMAIL_DOMAINS.some((domain) => address.includes(domain));
++}
++
++function parseAddr(emailFrom: string): { displayName: string; emailAddress: string } {
++  const match = emailFrom.match(/^(?:"?([^"]*)"?\s)?<?([^<>@\s]+@[^<>\s]+)>?$/);
++  if (match) {
++    return {
++      displayName: (match[1] || "").trim().replace(/^["']|["']$/g, ""),
++      emailAddress: (match[2] || "").trim().toLowerCase(),
++    };
++  }
++  if (emailFrom.includes("@")) {
++    return { displayName: "", emailAddress: emailFrom.trim().toLowerCase() };
++  }
++  return { displayName: emailFrom.trim(), emailAddress: "" };
++}
++
++export function partnerFromEmailSender(emailFrom: string | null | undefined): string | null {
++  if (!emailFrom) return null;
++  const { displayName, emailAddress } = parseAddr(emailFrom);
++  if (isExponentiaEmail(emailAddress) || isExponentiaName(displayName)) return null;
++  if (displayName && !isExponentiaName(displayName)) return displayName;
++  if (emailAddress && emailAddress.includes("@")) {
++    const domainLabel = emailAddress.split("@")[1]?.split(".")[0] || "";
++    const generic = new Set(["gmail", "yahoo", "hotmail", "outlook", "live", "icloud"]);
++    if (domainLabel && !generic.has(domainLabel) && !isExponentiaName(domainLabel)) {
++      return domainLabel.replace(/[-_]/g, " ").replace(/\b\w/g, (c) => c.toUpperCase());
++    }
++  }
++  return null;
++}
++
++export function normalizePartnerName(
++  partner: unknown,
++  emailFrom?: string | null
++): string {
++  const text = String(partner ?? "").trim();
++  if (text && !isExponentiaName(text)) return text;
++  const sender = partnerFromEmailSender(emailFrom);
++  return sender || "-";
++}
+diff --git a/src/lib/funnel/quote-id.ts b/src/lib/funnel/quote-id.ts
+new file mode 100644
+index 0000000..6db3e85
+--- /dev/null
++++ b/src/lib/funnel/quote-id.ts
+@@ -0,0 +1,108 @@
++/** Quote ID: body-only I###-## / F###-## (never subject / partner refs). */
++
++const EXPONENTIA_QUOTE_ID_RE = /\b([IF])\s*0*(\d{1,5})\s*-\s*0*(\d{2})\b/gi;
++const EMAIL_THREAD_SPLIT_RE =
++  /^(?:From:\s|Sent:\s|-----+ ?Original Message ?-----+|Begin forwarded message:)/im;
++const EXPLICIT_QUOTE_ID_LABEL_RE =
++  /\bQuote\s*ID\s*[:\-–]?\s*([IF]\s*0*\d{1,5}\s*-\s*0*\d{2})\b/gi;
++const ADD_ARCHIVE_VARIANT_RE =
++  /\b(?:pls\s+)?(?:add|update(?:d)?)\s*(?:&|and)\s*archive\b/gis;
++
++function formatQuoteId(prefix: string, number: string, year: string): string {
++  return `${prefix.toUpperCase()}${parseInt(number, 10)}-${year.padStart(2, "0")}`;
++}
++
++export function isValidExponentiaQuoteId(value: unknown): boolean {
++  const text = String(value ?? "").trim();
++  if (!text || text === "-") return false;
++  return /^([IF])\s*0*(\d{1,5})\s*-\s*0*(\d{2})$/i.test(text);
++}
++
++function emailMessageTip(text: string): string {
++  if (!text) return "";
++  const normalized = text.replace(/\r\n/g, "\n").replace(/\r/g, "\n");
++  const match = EMAIL_THREAD_SPLIT_RE.exec(normalized);
++  if (match && match.index > 20) return normalized.slice(0, match.index);
++  return normalized.slice(0, 2500);
++}
++
++function parseQuoteIdToken(raw: string): string | null {
++  EXPONENTIA_QUOTE_ID_RE.lastIndex = 0;
++  const parsed = EXPONENTIA_QUOTE_ID_RE.exec(raw);
++  if (!parsed) return null;
++  return formatQuoteId(parsed[1], parsed[2], parsed[3]);
++}
++
++export function findExponentiaQuoteIdsInText(text: string | null | undefined): string[] {
++  if (!text) return [];
++  const tip = emailMessageTip(text);
++  const ordered: string[] = [];
++  const push = (c: string | null) => {
++    if (c && !ordered.includes(c)) ordered.push(c);
++  };
++
++  EXPLICIT_QUOTE_ID_LABEL_RE.lastIndex = 0;
++  let m: RegExpExecArray | null;
++  while ((m = EXPLICIT_QUOTE_ID_LABEL_RE.exec(tip))) {
++    push(parseQuoteIdToken(m[1]));
++  }
++
++  ADD_ARCHIVE_VARIANT_RE.lastIndex = 0;
++  while ((m = ADD_ARCHIVE_VARIANT_RE.exec(tip))) {
++    const windowStart = Math.max(0, m.index - 80);
++    const windowEnd = Math.min(tip.length, m.index + m[0].length + 80);
++    const before = tip.slice(windowStart, m.index);
++    const window = tip.slice(windowStart, windowEnd);
++    for (const chunk of [before, window]) {
++      EXPONENTIA_QUOTE_ID_RE.lastIndex = 0;
++      let qm: RegExpExecArray | null;
++      while ((qm = EXPONENTIA_QUOTE_ID_RE.exec(chunk))) {
++        push(formatQuoteId(qm[1], qm[2], qm[3]));
++      }
++    }
++  }
++
++  const tipHead = tip
++    .split("\n")
++    .map((ln) => ln.trim())
++    .filter(Boolean)
++    .slice(0, 12)
++    .join("\n");
++  EXPONENTIA_QUOTE_ID_RE.lastIndex = 0;
++  while ((m = EXPONENTIA_QUOTE_ID_RE.exec(tipHead))) {
++    push(formatQuoteId(m[1], m[2], m[3]));
++  }
++
++  if (ordered.length) return ordered;
++
++  EXPONENTIA_QUOTE_ID_RE.lastIndex = 0;
++  while ((m = EXPONENTIA_QUOTE_ID_RE.exec(text))) {
++    push(formatQuoteId(m[1], m[2], m[3]));
++  }
++  return ordered;
++}
++
++export function normalizeQuoteId(
++  value: unknown,
++  emailBody?: string | null
++): string {
++  const recovered = findExponentiaQuoteIdsInText(emailBody);
++  if (recovered.length) return recovered[0];
++
++  const text = String(value ?? "").trim();
++  if (isValidExponentiaQuoteId(text)) {
++    const match = text.match(/^([IF])\s*0*(\d{1,5})\s*-\s*0*(\d{2})$/i)!;
++    return formatQuoteId(match[1], match[2], match[3]);
++  }
++  return "-";
++}
++
++/** Natural sort key for I698-26 / F780-23 style IDs. */
++export function quoteIdSortKey(quoteId: unknown): [number, number, string, number, string] {
++  const text = String(quoteId ?? "").trim().toUpperCase();
++  const match = text.match(/^([A-Z]+)\s*0*([0-9]+)\s*-\s*0*([0-9]+)$/);
++  if (match) {
++    return [0, parseInt(match[3], 10), match[1], parseInt(match[2], 10), text];
++  }
++  return [1, 0, "", 0, text];
++}
+diff --git a/src/lib/funnel/sheets.ts b/src/lib/funnel/sheets.ts
+new file mode 100644
+index 0000000..deabc26
+--- /dev/null
++++ b/src/lib/funnel/sheets.ts
+@@ -0,0 +1,313 @@
++/** Google Sheets access for the Sales Funnel Bot (service account). */
++
++import { google, sheets_v4 } from "googleapis";
++import fs from "fs";
++import path from "path";
++import {
++  DEFAULT_SPREADSHEET_ID,
++  FUNNEL_COLUMN_COUNT,
++  FUNNEL_COLUMN_HEADERS,
++  FUNNEL_SCOPES,
++  FUNNEL_WORKSHEET_GID,
++  MEDIA_FIBER,
++  MEDIA_WIRELESS,
++  SHEET_DATE_COLUMN_INDICES,
++} from "./constants";
++import { colIndexToLetter, formatSheetDate, parseSheetDateValue } from "./dates";
++
++type SaInfo = Record<string, string>;
++
++function normalizeServiceAccountInfo(info: SaInfo | null): SaInfo | null {
++  if (!info) return null;
++  const data = { ...info };
++  if (typeof data.private_key === "string" && data.private_key.includes("\\n")) {
++    data.private_key = data.private_key.replace(/\\n/g, "\n");
++  }
++  if (!data.client_email || !data.private_key) return null;
++  return data;
++}
++
++function loadServiceAccountInfo(): SaInfo | null {
++  const jsonEnv = process.env.GOOGLE_SERVICE_ACCOUNT_JSON || process.env.FUNNEL_SERVICE_ACCOUNT_JSON;
++  if (jsonEnv?.trim()) {
++    try {
++      return normalizeServiceAccountInfo(JSON.parse(jsonEnv) as SaInfo);
++    } catch {
++      /* fall through */
++    }
++  }
++
++  const filePath =
++    process.env.GOOGLE_SERVICE_ACCOUNT_PATH ||
++    process.env.FUNNEL_SERVICE_ACCOUNT_PATH ||
++    process.env.GOOGLE_APPLICATION_CREDENTIALS;
++  if (filePath) {
++    const resolved = path.isAbsolute(filePath) ? filePath : path.join(process.cwd(), filePath);
++    if (fs.existsSync(resolved)) {
++      try {
++        return normalizeServiceAccountInfo(JSON.parse(fs.readFileSync(resolved, "utf8")) as SaInfo);
++      } catch {
++        /* fall through */
++      }
++    }
++  }
++
++  // Nested env vars (GCP_SERVICE_ACCOUNT_*)
++  const prefix = "GCP_SERVICE_ACCOUNT_";
++  const fieldMap: Record<string, string> = {
++    TYPE: "type",
++    PROJECT_ID: "project_id",
++    PRIVATE_KEY_ID: "private_key_id",
++    PRIVATE_KEY: "private_key",
++    CLIENT_EMAIL: "client_email",
++    CLIENT_ID: "client_id",
++    AUTH_URI: "auth_uri",
++    TOKEN_URI: "token_uri",
++    AUTH_PROVIDER_X509_CERT_URL: "auth_provider_x509_cert_url",
++    CLIENT_X509_CERT_URL: "client_x509_cert_url",
++    UNIVERSE_DOMAIN: "universe_domain",
++  };
++  const built: SaInfo = {};
++  for (const [suffix, key] of Object.entries(fieldMap)) {
++    const v = process.env[`${prefix}${suffix}`];
++    if (v) built[key] = v;
++  }
++  if (built.client_email && built.private_key) {
++    return normalizeServiceAccountInfo(built);
++  }
++  return null;
++}
++
++export function funnelSheetsConfigured(): boolean {
++  return !!loadServiceAccountInfo();
++}
++
++export function funnelSpreadsheetId(): string {
++  return process.env.FUNNEL_SPREADSHEET_ID || DEFAULT_SPREADSHEET_ID;
++}
++
++async function sheetsClient(): Promise<sheets_v4.Sheets> {
++  const info = loadServiceAccountInfo();
++  if (!info) throw new Error("Google service account not configured for Funnel Sheets");
++  const auth = new google.auth.GoogleAuth({
++    credentials: info,
++    scopes: [...FUNNEL_SCOPES],
++  });
++  return google.sheets({ version: "v4", auth });
++}
++
++async function resolveSheetTitle(sheets: sheets_v4.Sheets, spreadsheetId: string): Promise<string> {
++  const meta = await sheets.spreadsheets.get({ spreadsheetId });
++  const gid = FUNNEL_WORKSHEET_GID;
++  const match = meta.data.sheets?.find((s) => s.properties?.sheetId === gid);
++  if (match?.properties?.title) return match.properties.title;
++  const first = meta.data.sheets?.[0]?.properties?.title;
++  if (!first) throw new Error("Spreadsheet has no worksheets");
++  return first;
++}
++
++function normalizeSheetHeader(text: unknown): string {
++  return String(text ?? "")
++    .trim()
++    .toLowerCase()
++    .replace(/\s+/g, " ")
++    .replace(/ \/ /g, "/")
++    .replace(/\/ /g, "/")
++    .replace(/ \//g, "/");
++}
++
++export async function getAllSheetValues(): Promise<string[][]> {
++  const sheets = await sheetsClient();
++  const spreadsheetId = funnelSpreadsheetId();
++  const title = await resolveSheetTitle(sheets, spreadsheetId);
++  const res = await sheets.spreadsheets.values.get({
++    spreadsheetId,
++    range: `'${title}'`,
++  });
++  return (res.data.values as string[][]) || [];
++}
++
++export async function ensureFunnelSheetColumns(): Promise<{ changed: boolean; message: string }> {
++  const sheets = await sheetsClient();
++  const spreadsheetId = funnelSpreadsheetId();
++  const title = await resolveSheetTitle(sheets, spreadsheetId);
++  const allValues = await getAllSheetValues();
++  const currentHeaders = allValues[0] || [];
++  const currentNormalized = currentHeaders
++    .slice(0, FUNNEL_COLUMN_COUNT)
++    .map(normalizeSheetHeader);
++  const requiredNormalized = FUNNEL_COLUMN_HEADERS.map(normalizeSheetHeader);
++  const headersMatch =
++    currentHeaders.length >= FUNNEL_COLUMN_COUNT &&
++    currentNormalized.length === requiredNormalized.length &&
++    currentNormalized.every((h, i) => h === requiredNormalized[i]);
++
++  if (headersMatch) {
++    return { changed: false, message: "Funnel column headers already match the 31-column layout." };
++  }
++
++  const lastCol = colIndexToLetter(FUNNEL_COLUMN_COUNT - 1);
++  await sheets.spreadsheets.values.update({
++    spreadsheetId,
++    range: `'${title}'!A1:${lastCol}1`,
++    valueInputOption: "USER_ENTERED",
++    requestBody: { values: [[...FUNNEL_COLUMN_HEADERS]] },
++  });
++
++  if (!allValues.length) {
++    return { changed: true, message: `Created ${FUNNEL_COLUMN_COUNT} funnel column headers on an empty sheet.` };
++  }
++  return { changed: true, message: `Updated row 1 to the ${FUNNEL_COLUMN_COUNT}-column funnel layout.` };
++}
++
++export async function appendFunnelRows(rows: unknown[][]): Promise<void> {
++  if (!rows.length) return;
++  const sheets = await sheetsClient();
++  const spreadsheetId = funnelSpreadsheetId();
++  const title = await resolveSheetTitle(sheets, spreadsheetId);
++  const existing = await getAllSheetValues();
++  const firstRow = existing.length + 1; // 1-based; if header-only, append at row 2
++  await sheets.spreadsheets.values.append({
++    spreadsheetId,
++    range: `'${title}'!A1`,
++    valueInputOption: "USER_ENTERED",
++    insertDataOption: "INSERT_ROWS",
++    requestBody: { values: rows.map((r) => r.map((c) => (c == null ? "" : c))) },
++  });
++
++  const lastRow = firstRow + rows.length - 1;
++  try {
++    const meta = await sheets.spreadsheets.get({ spreadsheetId });
++    const sheetId =
++      meta.data.sheets?.find((s) => s.properties?.title === title)?.properties?.sheetId ??
++      FUNNEL_WORKSHEET_GID;
++    await sheets.spreadsheets.batchUpdate({
++      spreadsheetId,
++      requestBody: {
++        requests: [
++          {
++            repeatCell: {
++              range: {
++                sheetId: sheetId ?? 0,
++                startRowIndex: firstRow - 1,
++                endRowIndex: lastRow,
++                startColumnIndex: 12,
++                endColumnIndex: 14,
++              },
++              cell: {
++                userEnteredFormat: {
++                  numberFormat: { type: "CURRENCY", pattern: "$#,##0.00" },
++                },
++              },
++              fields: "userEnteredFormat.numberFormat",
++            },
++          },
++        ],
++      },
++    });
++  } catch {
++    /* formatting is best-effort */
++  }
++  void MEDIA_FIBER;
++  void MEDIA_WIRELESS;
++}
++
++export async function replaceAllFunnelRows(headerPlusRows: unknown[][]): Promise<void> {
++  const sheets = await sheetsClient();
++  const spreadsheetId = funnelSpreadsheetId();
++  const title = await resolveSheetTitle(sheets, spreadsheetId);
++  await sheets.spreadsheets.values.clear({
++    spreadsheetId,
++    range: `'${title}'`,
++  });
++  await sheets.spreadsheets.values.update({
++    spreadsheetId,
++    range: `'${title}'!A1`,
++    valueInputOption: "USER_ENTERED",
++    requestBody: {
++      values: headerPlusRows.map((r) => r.map((c) => (c == null ? "" : c))),
++    },
++  });
++
++  if (headerPlusRows.length > 1) {
++    try {
++      const meta = await sheets.spreadsheets.get({ spreadsheetId });
++      const sheetId =
++        meta.data.sheets?.find((s) => s.properties?.title === title)?.properties?.sheetId ??
++        FUNNEL_WORKSHEET_GID;
++      await sheets.spreadsheets.batchUpdate({
++        spreadsheetId,
++        requestBody: {
++          requests: [
++            {
++              repeatCell: {
++                range: {
++                  sheetId: sheetId ?? 0,
++                  startRowIndex: 1,
++                  endRowIndex: headerPlusRows.length,
++                  startColumnIndex: 12,
++                  endColumnIndex: 14,
++                },
++                cell: {
++                  userEnteredFormat: {
++                    numberFormat: { type: "CURRENCY", pattern: "$#,##0.00" },
++                  },
++                },
++                fields: "userEnteredFormat.numberFormat",
++              },
++            },
++          ],
++        },
++      });
++    } catch {
++      /* best-effort */
++    }
++  }
++}
++
++export async function reformatExistingSheetDates(): Promise<string> {
++  const sheets = await sheetsClient();
++  const spreadsheetId = funnelSpreadsheetId();
++  const title = await resolveSheetTitle(sheets, spreadsheetId);
++  const allValues = await getAllSheetValues();
++  if (!allValues.length) return "Sheet is empty — nothing to update.";
++
++  const data: { range: string; values: string[][] }[] = [];
++  let updatedCells = 0;
++  const rowNums = new Set<number>();
++
++  for (let rowIdx = 1; rowIdx < allValues.length; rowIdx++) {
++    const row = allValues[rowIdx];
++    const rowNum = rowIdx + 1;
++    for (const colIdx of SHEET_DATE_COLUMN_INDICES) {
++      if (colIdx >= row.length) continue;
++      const raw = row[colIdx];
++      const parsed = parseSheetDateValue(raw);
++      if (!parsed) continue;
++      const formatted = formatSheetDate(parsed);
++      if (String(raw).trim() === formatted) continue;
++      const colLetter = colIndexToLetter(colIdx);
++      data.push({ range: `'${title}'!${colLetter}${rowNum}`, values: [[formatted]] });
++      updatedCells += 1;
++      rowNums.add(rowNum);
++    }
++  }
++
++  if (!data.length) {
++    return "All dates already use dd-Month-yyyy (e.g. 19-May-2026).";
++  }
++
++  await sheets.spreadsheets.values.batchUpdate({
++    spreadsheetId,
++    requestBody: {
++      valueInputOption: "USER_ENTERED",
++      data,
++    },
++  });
++
++  return `Updated ${updatedCells} date cell(s) across ${rowNums.size} row(s) to dd-Month-yyyy (e.g. 19-May-2026).`;
++}
++
++export function serviceAccountEmail(): string | null {
++  return loadServiceAccountInfo()?.client_email ?? null;
++}
+diff --git a/src/lib/funnel/sync.ts b/src/lib/funnel/sync.ts
+new file mode 100644
+index 0000000..d7dd3e7
+--- /dev/null
++++ b/src/lib/funnel/sync.ts
+@@ -0,0 +1,339 @@
++/** Sales Funnel Bot orchestration (Expo run_bot / reapply / setup). */
++
++import { FUNNEL_COLUMN_COUNT, FUNNEL_COLUMN_HEADERS, SHEET_URL } from "./constants";
++import { formatAiSheetDates, computeTatFromDateStrings, formatSheetDate } from "./dates";
++import { extractFunnelCircuits, funnelGeminiConfigured } from "./gemini";
++import {
++  fetchUnreadFunnelEmails,
++  funnelEmailConfigured,
++  funnelEmailUser,
++  markFunnelEmailRead,
++} from "./gmail";
++import {
++  formatCurrency,
++  normalizeContractTerm,
++  normalizeEndCustomer,
++  normalizeLmInfra,
++  normalizeOfferedUs,
++  normalizeOnNetStatus,
++  normalizePartnerName,
++  normalizeProtectionStatus,
++  normalizeXcStatus,
++  resolveTechnology,
++} from "./normalizers";
++import { normalizeQuoteId } from "./quote-id";
++import { quoteIdSortKey } from "./quote-id";
++import {
++  appendFunnelRows,
++  ensureFunnelSheetColumns,
++  funnelSheetsConfigured,
++  getAllSheetValues,
++  replaceAllFunnelRows,
++  serviceAccountEmail,
++} from "./sheets";
++import { loadPublicHolidays } from "./tat";
++
++export type FunnelStatus = {
++  sheetsConfigured: boolean;
++  emailConfigured: boolean;
++  geminiConfigured: boolean;
++  sheetUrl: string;
++  serviceAccountEmail: string | null;
++  emailUser: string;
++};
++
++export function getFunnelStatus(): FunnelStatus {
++  return {
++    sheetsConfigured: funnelSheetsConfigured(),
++    emailConfigured: funnelEmailConfigured(),
++    geminiConfigured: funnelGeminiConfigured(),
++    sheetUrl: SHEET_URL,
++    serviceAccountEmail: serviceAccountEmail(),
++    emailUser: funnelEmailUser(),
++  };
++}
++
++function cell(row: string[], idx: number, fallback = "-"): string {
++  const v = row[idx];
++  return v != null && String(v).trim() ? String(v).trim() : fallback;
++}
++
++function padRow(row: string[]): string[] {
++  const copy = [...row];
++  while (copy.length < FUNNEL_COLUMN_COUNT) copy.push("-");
++  return copy;
++}
++
++export async function setupFunnelColumns(): Promise<{ changed: boolean; message: string }> {
++  if (!funnelSheetsConfigured()) {
++    throw new Error(
++      "Google Sheets not configured. Set GOOGLE_SERVICE_ACCOUNT_JSON (or PATH) and share the sheet with the service account."
++    );
++  }
++  return ensureFunnelSheetColumns();
++}
++
++export async function reapplyFunnelRules(): Promise<{ message: string; rowCount: number }> {
++  if (!funnelSheetsConfigured()) {
++    throw new Error("Google Sheets not configured for Funnel Bot");
++  }
++  await ensureFunnelSheetColumns();
++  const allValues = await getAllSheetValues();
++  if (!allValues.length || allValues.length <= 1) {
++    return { message: "Sheet contains no data rows to align.", rowCount: 0 };
++  }
++
++  const dataRows = allValues.slice(1).map(padRow);
++  const publicHolidays = loadPublicHolidays();
++  const alignedRows: unknown[][] = [];
++
++  for (const row of dataRows) {
++    const quoteId = cell(row, 1);
++    const partnerName = normalizePartnerName(row[3]);
++    const endCustomer = normalizeEndCustomer(row[4]);
++    let siteA = cell(row, 5);
++    let siteACity = cell(row, 6);
++    let siteB = cell(row, 7);
++    let siteBCity = cell(row, 8);
++    const serviceRaw = cell(row, 10);
++    const techNorm = resolveTechnology(serviceRaw, row[9]);
++    const capacity = cell(row, 11);
++    const commMode = cell(row, 14, "Email");
++    const salesEffort = cell(row, 17);
++    const comments = cell(row, 18);
++    const status = cell(row, 19, "OPEN");
++    const subStatus = cell(row, 20, "MEDIUM");
++    const poc = cell(row, 21);
++    const emailAddr = cell(row, 22);
++
++    let xcStatus: string;
++    if (techNorm === "Internet") {
++      siteB = "-";
++      siteBCity = "-";
++      xcStatus = "-";
++    } else {
++      xcStatus = normalizeXcStatus(row[28]);
++    }
++
++    let oppFormatted: string;
++    let propFormatted: string;
++    let tat: number;
++    let holidayCount: number;
++    const tatResult = computeTatFromDateStrings(row[2], row[15], publicHolidays);
++    if (tatResult.oppFormatted == null) {
++      oppFormatted = formatSheetDate(row[2]);
++      propFormatted = formatSheetDate(row[15]);
++      tat = 0;
++      holidayCount = 0;
++    } else {
++      oppFormatted = tatResult.oppFormatted;
++      propFormatted = tatResult.propFormatted!;
++      tat = tatResult.tat;
++      holidayCount = tatResult.holidayCount;
++    }
++
++    alignedRows.push([
++      null,
++      quoteId,
++      oppFormatted,
++      partnerName,
++      endCustomer,
++      siteA,
++      siteACity,
++      siteB,
++      siteBCity,
++      techNorm,
++      serviceRaw,
++      capacity,
++      formatCurrency(row[12]),
++      formatCurrency(row[13]),
++      commMode,
++      propFormatted,
++      normalizeContractTerm(row[16]),
++      salesEffort,
++      comments,
++      status,
++      subStatus,
++      poc,
++      emailAddr,
++      tat,
++      normalizeOnNetStatus(row[24]),
++      normalizeLmInfra(row[25], comments),
++      normalizeProtectionStatus(row[26], "Unprotected"),
++      normalizeProtectionStatus(row[27], "N/A"),
++      xcStatus,
++      holidayCount,
++      normalizeOfferedUs(row[30]),
++    ]);
++  }
++
++  alignedRows.sort((a, b) => {
++    const ka = quoteIdSortKey(a[1]);
++    const kb = quoteIdSortKey(b[1]);
++    for (let i = 0; i < ka.length; i++) {
++      if (ka[i] < kb[i]) return -1;
++      if (ka[i] > kb[i]) return 1;
++    }
++    return 0;
++  });
++
++  for (let i = 0; i < alignedRows.length; i++) {
++    alignedRows[i][0] = i + 1;
++  }
++
++  await replaceAllFunnelRows([[...FUNNEL_COLUMN_HEADERS], ...alignedRows]);
++  return {
++    message: `Success! Reapplied all automation rules (Pakistan holiday-aware TAT) and bunched Quote IDs in ascending order across all ${alignedRows.length} live funnel lines!`,
++    rowCount: alignedRows.length,
++  };
++}
++
++export async function runFunnelSync(): Promise<{
++  message: string;
++  rowsAdded: number;
++  emailsScanned: number;
++}> {
++  if (!funnelSheetsConfigured()) {
++    throw new Error(
++      "Google Sheets not configured. Set GOOGLE_SERVICE_ACCOUNT_JSON (or PATH) and share the sheet."
++    );
++  }
++  if (!funnelEmailConfigured()) {
++    throw new Error("Email not configured (set IMAP_* or GMAIL_* env vars)");
++  }
++  if (!funnelGeminiConfigured()) {
++    throw new Error("GEMINI_API_KEY is not configured");
++  }
++
++  await ensureFunnelSheetColumns();
++  const existing = await getAllSheetValues();
++  const dataRowCount = Math.max(0, existing.length - (existing.length ? 1 : 0));
++  let lastSNo = dataRowCount + 1;
++
++  const emails = await fetchUnreadFunnelEmails();
++  if (!emails.length) {
++    return {
++      message: "No new (unread) emails found. Mark a quote email as Unread to test.",
++      rowsAdded: 0,
++      emailsScanned: 0,
++    };
++  }
++
++  const emailUser = funnelEmailUser();
++  const publicHolidays = loadPublicHolidays();
++  const newRows: unknown[][] = [];
++
++  for (const mail of emails) {
++    const body = mail.body || "";
++    const forcedQuoteId = normalizeQuoteId(null, body);
++
++    try {
++      const aiData = await extractFunnelCircuits(body, emailUser);
++      let circuits = aiData.circuits || [];
++      if (!Array.isArray(circuits) && circuits && typeof circuits === "object") {
++        circuits = [circuits as (typeof circuits)[number]];
++      }
++
++      for (const c of circuits) {
++        const { oppFormatted, propFormatted, tat, holidayCount } = formatAiSheetDates(
++          c["Opportunity Date"] || "",
++          c["Proposal Date"] || "",
++          publicHolidays
++        );
++
++        const serviceRaw = c["Service/Product"] || "-";
++        const techNorm = resolveTechnology(serviceRaw, c.Technology || "-");
++        const lmInfra = normalizeLmInfra(c["LM Infra Details"], c.Comments);
++        const partnerName = normalizePartnerName(c["Partner Name"], mail.from);
++        const endCustomer = normalizeEndCustomer(c["End Customer"]);
++        const onNet = normalizeOnNetStatus(c["On-Net/Off-Net"]);
++        const contractTerm = normalizeContractTerm(c["Contract Terms"]);
++        const lastMileProtection = normalizeProtectionStatus(
++          c["Last Mile Protection"],
++          "Unprotected"
++        );
++        const wetSegmentProtection = normalizeProtectionStatus(
++          c["Wet Segment Protection"],
++          "N/A"
++        );
++
++        let siteA = c["Site A"] || "-";
++        let siteACity = c["Site A City"] || "-";
++        let siteB: string;
++        let siteBCity: string;
++        let xcStatus: string;
++        if (techNorm === "Internet") {
++          siteB = "-";
++          siteBCity = "-";
++          xcStatus = "-";
++        } else {
++          siteB = c["Site B"] || "-";
++          siteBCity = c["Site B City"] || "-";
++          xcStatus = normalizeXcStatus(c["XC Included/Excluded"]);
++        }
++
++        const offeredUs = normalizeOfferedUs(c["Offered Us"]);
++        const quoteId =
++          forcedQuoteId !== "-"
++            ? forcedQuoteId
++            : normalizeQuoteId(c["Quote ID"] || "-", body);
++
++        newRows.push([
++          lastSNo,
++          quoteId,
++          oppFormatted,
++          partnerName,
++          endCustomer,
++          siteA,
++          siteACity,
++          siteB,
++          siteBCity,
++          techNorm,
++          serviceRaw,
++          c["Capacity / Quantity"] || "-",
++          formatCurrency(c.NRC),
++          formatCurrency(c.MRC),
++          "Email",
++          propFormatted,
++          contractTerm,
++          c["Sales Effort By"] || "-",
++          c.Comments || "-",
++          "OPEN",
++          "MEDIUM",
++          c.POC || "-",
++          c["Contact Email Address"] || "-",
++          tat,
++          onNet,
++          lmInfra,
++          lastMileProtection,
++          wetSegmentProtection,
++          xcStatus,
++          holidayCount,
++          offeredUs,
++        ]);
++        lastSNo += 1;
++      }
++    } catch (err) {
++      // Mark read anyway to avoid hot-looping on a poison email; surface error after.
++      await markFunnelEmailRead(mail.id).catch(() => {});
++      throw err;
++    }
++
++    await markFunnelEmailRead(mail.id).catch(() => {});
++  }
++
++  if (newRows.length) {
++    await appendFunnelRows(newRows);
++    return {
++      message: `Success! Added ${newRows.length} perfectly structured rows to the Google Sheet!`,
++      rowsAdded: newRows.length,
++      emailsScanned: emails.length,
++    };
++  }
++
++  return {
++    message: "Unread emails processed, but no valid data structures were detected by Gemini.",
++    rowsAdded: 0,
++    emailsScanned: emails.length,
++  };
++}
+diff --git a/src/lib/funnel/tat.ts b/src/lib/funnel/tat.ts
+new file mode 100644
+index 0000000..0da7fc6
+--- /dev/null
++++ b/src/lib/funnel/tat.ts
+@@ -0,0 +1,108 @@
++/**
++ * Pakistan holiday-aware TAT (ported from Expo).
++ * TAT = business days between Opportunity and Proposal (inclusive span minus 1),
++ * excluding Sat/Sun and Pakistan public holidays.
++ */
++
++import holidaysData from "./holidays.json";
++
++type HolidayEntry = { date: string; name: string };
++type HolidaysFile = {
++  dates?: string[];
++  holidays?: HolidayEntry[];
++};
++
++function loadHolidaySet(): Set<string> {
++  const data = holidaysData as HolidaysFile;
++  const set = new Set<string>();
++  for (const item of data.dates ?? []) {
++    const text = String(item).trim();
++    if (/^\d{4}-\d{2}-\d{2}$/.test(text)) set.add(text);
++  }
++  for (const entry of data.holidays ?? []) {
++    const text = String(entry?.date ?? "").trim();
++    if (/^\d{4}-\d{2}-\d{2}$/.test(text)) set.add(text);
++  }
++  return set;
++}
++
++let cachedHolidays: Set<string> | null = null;
++
++export function loadPublicHolidays(): Set<string> {
++  if (!cachedHolidays) cachedHolidays = loadHolidaySet();
++  return cachedHolidays;
++}
++
++export function holidayName(ymd: string): string | undefined {
++  const data = holidaysData as HolidaysFile;
++  return data.holidays?.find((h) => h.date === ymd)?.name;
++}
++
++function ymd(d: Date): string {
++  const y = d.getFullYear();
++  const m = String(d.getMonth() + 1).padStart(2, "0");
++  const day = String(d.getDate()).padStart(2, "0");
++  return `${y}-${m}-${day}`;
++}
++
++function startOfDay(d: Date): Date {
++  return new Date(d.getFullYear(), d.getMonth(), d.getDate());
++}
++
++/** Count Pakistan public holidays on weekdays within [start, end] inclusive. */
++export function countHolidaysInRange(
++  startDate: Date,
++  endDate: Date,
++  holidays?: Set<string>
++): number {
++  const holidaySet = holidays ?? loadPublicHolidays();
++  if (!holidaySet.size) return 0;
++  let current = startOfDay(startDate);
++  const end = startOfDay(endDate);
++  let count = 0;
++  while (current.getTime() <= end.getTime()) {
++    const key = ymd(current);
++    if (holidaySet.has(key) && current.getDay() !== 0 && current.getDay() !== 6) {
++      count += 1;
++    }
++    current = new Date(current.getFullYear(), current.getMonth(), current.getDate() + 1);
++  }
++  return count;
++}
++
++/**
++ * Business days in [start, end] inclusive, minus 1 (exclusive TAT),
++ * excluding weekends and Pakistan holidays.
++ */
++export function calculateWorkingDaysExclusive(
++  startDate: Date,
++  endDate: Date,
++  holidays?: Set<string>
++): number {
++  if (startDate.getTime() >= endDate.getTime()) return 0;
++  const holidaySet = holidays ?? loadPublicHolidays();
++  let current = startOfDay(startDate);
++  const end = startOfDay(endDate);
++  let workingDays = 0;
++  while (current.getTime() <= end.getTime()) {
++    const key = ymd(current);
++    const dow = current.getDay();
++    if (dow !== 0 && dow !== 6 && !holidaySet.has(key)) {
++      workingDays += 1;
++    }
++    current = new Date(current.getFullYear(), current.getMonth(), current.getDate() + 1);
++  }
++  return Math.max(0, workingDays - 1);
++}
++
++export function computeTatFromDates(
++  startDate: Date,
++  endDate: Date,
++  holidays?: Set<string>
++): { tat: number; holidayCount: number } {
++  const holidaySet = holidays ?? loadPublicHolidays();
++  return {
++    tat: calculateWorkingDaysExclusive(startDate, endDate, holidaySet),
++    holidayCount: countHolidaysInRange(startDate, endDate, holidaySet),
++  };
++}
+-- 
+2.43.0
+
+
+From 2eab4395743ace5872e418381236cddcabb78c29 Mon Sep 17 00:00:00 2001
+From: Cursor Agent <cursoragent@cursor.com>
+Date: Thu, 30 Jul 2026 07:12:05 +0000
+Subject: [PATCH 2/2] Default Gemini model to gemini-2.5-flash for Funnel Bot
+
+New Google AI Studio keys reject gemini-2.0-flash (404). Align
+funnel + portal defaults and document the override in AGENTS.md.
+---
+ .env.example             | 4 ++--
+ AGENTS.md                | 1 +
+ src/lib/funnel/gemini.ts | 2 +-
+ src/lib/gemini.ts        | 2 +-
+ 4 files changed, 5 insertions(+), 4 deletions(-)
+
+diff --git a/.env.example b/.env.example
+index 28e2de4..0d5bbd0 100644
+--- a/.env.example
++++ b/.env.example
+@@ -21,7 +21,7 @@ ENCRYPTION_KEY="0000000000000000000000000000000000000000000000000000000000000000
+ 
+ # --- Google Gemini API ---
+ GEMINI_API_KEY=""
+-GEMINI_MODEL="gemini-2.0-flash"
++GEMINI_MODEL="gemini-2.5-flash"
+ 
+ # --- Email import provider: "imap" (Gmail app password) or "oauth" (Gmail API) ---
+ # Leave unset to auto-detect based on which credentials are present.
+@@ -59,7 +59,7 @@ GMAIL_USER="me"
+ FUNNEL_SPREADSHEET_ID="1E9gYdeZUwMEmnwe164io7E47QuXnBfYcELdulUroN_4"
+ FUNNEL_WORKSHEET_GID="0"
+ # Optional model override (defaults to GEMINI_MODEL)
+-# FUNNEL_GEMINI_MODEL="gemini-2.0-flash"
++# FUNNEL_GEMINI_MODEL="gemini-2.5-flash"
+ # Google service account with Sheets+Drive access (share the sheet with client_email)
+ # Option A: inline JSON
+ # GOOGLE_SERVICE_ACCOUNT_JSON='{"type":"service_account","client_email":"...","private_key":"-----BEGIN..."}'
+diff --git a/AGENTS.md b/AGENTS.md
+index 85d1426..67a4030 100644
+--- a/AGENTS.md
++++ b/AGENTS.md
+@@ -13,6 +13,7 @@ Enterprise telecom RFQ management portal (Next.js). See README for standard setu
+ - **Sync behavior:** processes **all UNSEEN** inbox mail (Expo-style), not only “Solution Request”. Quote IDs are body-only `I###-##` / `F###-##`.
+ - **TAT:** Pakistan holiday-aware working days between Opportunity and Proposal (`src/lib/funnel/holidays.json` + `tat.ts`).
+ - Sync/reapply can take up to ~60s on Gemini 503/429 retries (`maxDuration` 120 on those routes).
++- Default Gemini model is `gemini-2.5-flash` (`GEMINI_MODEL` / `FUNNEL_GEMINI_MODEL`). Older `gemini-2.0-flash` may 404 for new API keys.
+ 
+ ### Standard commands
+ 
+diff --git a/src/lib/funnel/gemini.ts b/src/lib/funnel/gemini.ts
+index d4d91dd..7d12b20 100644
+--- a/src/lib/funnel/gemini.ts
++++ b/src/lib/funnel/gemini.ts
+@@ -2,7 +2,7 @@
+ 
+ import { GoogleGenerativeAI, SchemaType, type ResponseSchema } from "@google/generative-ai";
+ 
+-const MODEL = process.env.FUNNEL_GEMINI_MODEL || process.env.GEMINI_MODEL || "gemini-2.0-flash";
++const MODEL = process.env.FUNNEL_GEMINI_MODEL || process.env.GEMINI_MODEL || "gemini-2.5-flash";
+ const RETRY_LIMIT_MS = 60_000;
+ 
+ export interface FunnelCircuit {
+diff --git a/src/lib/gemini.ts b/src/lib/gemini.ts
+index 9988e0f..f126946 100644
+--- a/src/lib/gemini.ts
++++ b/src/lib/gemini.ts
+@@ -5,7 +5,7 @@ import type { ExtractedRfq, DelayResult, BudgetaryOffer } from "@/types";
+ 
+ export { naiveBusinessDays };
+ 
+-const MODEL = process.env.GEMINI_MODEL || "gemini-2.0-flash";
++const MODEL = process.env.GEMINI_MODEL || "gemini-2.5-flash";
+ 
+ function client() {
+   const key = process.env.GEMINI_API_KEY;
+-- 
+2.43.0
+

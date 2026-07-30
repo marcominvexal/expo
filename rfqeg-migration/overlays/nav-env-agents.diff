@@ -1,0 +1,100 @@
+commit 95872fe3e769fdf10523e8b40d98ffe135a36c4f
+Author: Cursor Agent <cursoragent@cursor.com>
+Date:   Wed Jul 29 12:26:20 2026 +0000
+
+    Add Sales Funnel Bot as contained Expo module in RFQEG
+    
+    Port the Exponentia Gmail→Gemini→Sheets funnel into src/lib/funnel
+    with Sales-only /funnel UI and /api/funnel/* routes, separate from
+    RFQ Update From Email.
+
+diff --git a/.env.example b/.env.example
+index 2087a21..28e2de4 100644
+--- a/.env.example
++++ b/.env.example
+@@ -54,6 +54,18 @@ GMAIL_REFRESH_TOKEN=""
+ # Mailbox to search (usually the authenticated account)
+ GMAIL_USER="me"
+ 
++# --- Sales Funnel Bot (Expo module — Gmail → Gemini → Google Sheets) ---
++# Separate from RFQ "Update From Email". Sales-only UI at /funnel.
++FUNNEL_SPREADSHEET_ID="1E9gYdeZUwMEmnwe164io7E47QuXnBfYcELdulUroN_4"
++FUNNEL_WORKSHEET_GID="0"
++# Optional model override (defaults to GEMINI_MODEL)
++# FUNNEL_GEMINI_MODEL="gemini-2.0-flash"
++# Google service account with Sheets+Drive access (share the sheet with client_email)
++# Option A: inline JSON
++# GOOGLE_SERVICE_ACCOUNT_JSON='{"type":"service_account","client_email":"...","private_key":"-----BEGIN..."}'
++# Option B: path to JSON file (recommended locally; never commit the file)
++GOOGLE_SERVICE_ACCOUNT_PATH="service_account.json"
++
+ # --- Delay / SLA engine ---
+ DELAY_COUNTRY="Pakistan"
+ # Hours before deadline that the AI Budgetary Offer button auto-activates
+diff --git a/.gitignore b/.gitignore
+index b3a9416..2cdf799 100644
+--- a/.gitignore
++++ b/.gitignore
+@@ -40,3 +40,7 @@ yarn-error.log*
+ gmail-token.json
+ .vercel
+ .env*
++
++# Google service account JSON (Funnel Sheets) — never commit
++service_account.json
++**/service_account.json
+diff --git a/AGENTS.md b/AGENTS.md
+new file mode 100644
+index 0000000..85d1426
+--- /dev/null
++++ b/AGENTS.md
+@@ -0,0 +1,19 @@
++# RFQ Portal (RFQEG)
++
++Enterprise telecom RFQ management portal (Next.js). See README for standard setup.
++
++## Cursor Cloud specific instructions
++
++### Sales Funnel Bot (contained Expo module)
++
++- **Route:** `/funnel` (Sales-only nav item). **Not** the same as RFQs → “Update From Email” (that imports Solution Request RFQs into the portal DB).
++- **APIs (Sales JWT required):** `GET /api/funnel/status`, `POST /api/funnel/sync`, `POST /api/funnel/setup-columns`, `POST /api/funnel/reapply`.
++- **Logic lives in** `src/lib/funnel/*` — keep it self-contained; do not mix with `src/lib/gemini.ts` RFQ extractors or `update-from-email`.
++- **Credentials:** reuses `GEMINI_API_KEY`, `IMAP_*` (or Gmail OAuth). Sheets needs a **service account** via `GOOGLE_SERVICE_ACCOUNT_JSON` or `GOOGLE_SERVICE_ACCOUNT_PATH` (see `.env.example`). Share the spreadsheet with the SA `client_email`.
++- **Sync behavior:** processes **all UNSEEN** inbox mail (Expo-style), not only “Solution Request”. Quote IDs are body-only `I###-##` / `F###-##`.
++- **TAT:** Pakistan holiday-aware working days between Opportunity and Proposal (`src/lib/funnel/holidays.json` + `tat.ts`).
++- Sync/reapply can take up to ~60s on Gemini 503/429 retries (`maxDuration` 120 on those routes).
++
++### Standard commands
++
++Use `npm run dev`, `npm run lint`, `npm run typecheck`, `npm test` as documented in `package.json` / README.
+diff --git a/src/components/app-shell.tsx b/src/components/app-shell.tsx
+index 9266d01..f7a6ceb 100644
+--- a/src/components/app-shell.tsx
++++ b/src/components/app-shell.tsx
+@@ -1,7 +1,7 @@
+ "use client";
+ import Link from "next/link";
+ import { usePathname, useRouter } from "next/navigation";
+-import { LayoutDashboard, FileStack, Settings, Network, LogOut, Building2, Truck } from "lucide-react";
++import { LayoutDashboard, FileStack, Settings, Network, LogOut, Building2, Truck, Sheet } from "lucide-react";
+ import { motion } from "framer-motion";
+ import { cn } from "@/lib/utils";
+ import { Button } from "@/components/ui/button";
+@@ -13,6 +13,7 @@ import { api } from "@/lib/api-client";
+ const NAV = [
+   { href: "/dashboard", label: "Dashboard", icon: LayoutDashboard },
+   { href: "/rfqs", label: "RFQs", icon: FileStack },
++  { href: "/funnel", label: "Funnel", icon: Sheet, salesOnly: true },
+   { href: "/partners", label: "Partners", icon: Building2, salesOnly: true },
+   { href: "/suppliers", label: "Suppliers", icon: Truck, salesOnly: true },
+   { href: "/settings", label: "Settings", icon: Settings, salesOnly: true },
+@@ -93,7 +94,7 @@ export function AppShell({ children }: { children: React.ReactNode }) {
+ 
+         {/* Mobile bottom nav */}
+         <nav className="fixed bottom-0 left-0 right-0 z-40 flex border-t bg-background/95 backdrop-blur-xl md:hidden">
+-          {NAV.filter((n) => !n.salesOnly || user?.role === "SALES").slice(0, 4).map((n) => {
++          {NAV.filter((n) => !n.salesOnly || user?.role === "SALES").slice(0, 5).map((n) => {
+             const active = pathname.startsWith(n.href);
+             return (
+               <Link
